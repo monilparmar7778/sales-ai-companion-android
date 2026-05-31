@@ -9,7 +9,6 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.OpenableColumns
-import android.view.View
 import android.widget.*
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -20,8 +19,12 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class Contact(val id: String, val name: String, val phone: String)
+data class AudioCandidate(val uri: Uri, val name: String, val addedSeconds: Long, val modifiedSeconds: Long)
 data class CallSummary(
     val customerName: String,
     val phone: String,
@@ -55,6 +58,7 @@ class MainActivity : Activity() {
     private lateinit var customerNotesInput: EditText
     private lateinit var status: TextView
     private lateinit var recentCallPanel: LinearLayout
+    private lateinit var recentAudioList: LinearLayout
     private lateinit var contactList: LinearLayout
     private lateinit var dashboardList: LinearLayout
 
@@ -82,6 +86,7 @@ class MainActivity : Activity() {
         val dashboardButton = Button(this).apply { text = "Refresh Dashboard" }
         status = TextView(this).apply { text = "Ready" }
         recentCallPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        recentAudioList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         contactList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         dashboardList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
@@ -105,6 +110,7 @@ class MainActivity : Activity() {
         root.addView(status)
         root.addView(sectionTitle("After Call Upload"))
         root.addView(recentCallPanel)
+        root.addView(recentAudioList)
         root.addView(sectionTitle("Customers"))
         root.addView(contactList)
         root.addView(sectionTitle("Call Analysis Dashboard"))
@@ -330,7 +336,7 @@ class MainActivity : Activity() {
             text = "Find & Upload Call Recording"
             setOnClickListener {
                 selectedContact = contact
-                uploadLatestRecording(contact, readyToUploadStartedAt)
+                scanRecordingsForContact(contact, readyToUploadStartedAt)
             }
         })
         recentCallPanel.addView(Button(this).apply {
@@ -340,6 +346,7 @@ class MainActivity : Activity() {
                 pickRecording()
             }
         })
+        recentAudioList.removeAllViews()
     }
 
     private fun startAutoUploadPolling(contact: Contact, startedAtMs: Long) {
@@ -381,6 +388,15 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun hasAudioPermission(): Boolean {
+        val permission = if (Build.VERSION.SDK_INT >= 33) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+    }
+
     private fun pickRecording() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
@@ -408,7 +424,8 @@ class MainActivity : Activity() {
             try {
                 val latest = withContext(Dispatchers.IO) { findLatestAudioRecording(startedAtMs) }
                 if (latest == null) {
-                    status.text = "No new recording found. Use Upload Recording and select the file manually."
+                    status.text = "No recording auto-found. Scanning visible phone audio..."
+                    scanRecordingsForContact(contact, startedAtMs)
                     return@launch
                 }
                 uploadRecordingForContact(contact, latest)
@@ -416,6 +433,74 @@ class MainActivity : Activity() {
                 status.text = "Latest recording upload failed: ${errorMessage(exc)}"
             }
         }
+    }
+
+    private fun scanRecordingsForContact(contact: Contact, startedAtMs: Long) {
+        requestAudioPermission()
+        selectedContact = contact
+        recentAudioList.removeAllViews()
+        status.text = "Scanning phone audio for ${contact.name}..."
+
+        scope.launch {
+            try {
+                if (!hasAudioPermission()) {
+                    renderAudioScanHelp("Audio permission is not allowed. Allow Music/Audio permission for this app, then scan again.")
+                    status.text = "Audio permission required."
+                    return@launch
+                }
+
+                val candidates = withContext(Dispatchers.IO) { recentAudioCandidates(startedAtMs) }
+                if (candidates.isEmpty()) {
+                    renderAudioScanHelp("No audio file is visible to the app. Your phone recorder may save calls in a private/system folder.")
+                    status.text = "No visible audio found. Use Select Recording File."
+                    return@launch
+                }
+
+                renderAudioCandidates(contact, candidates)
+                status.text = "Found ${candidates.size} audio file(s). Choose the call recording to upload."
+            } catch (exc: Exception) {
+                renderAudioScanHelp("Scan failed: ${errorMessage(exc)}")
+                status.text = "Scan failed: ${errorMessage(exc)}"
+            }
+        }
+    }
+
+    private fun renderAudioCandidates(contact: Contact, candidates: List<AudioCandidate>) {
+        recentAudioList.removeAllViews()
+        recentAudioList.addView(TextView(this).apply {
+            text = "Visible Audio Files"
+            textSize = 18f
+            setPadding(0, 18, 0, 8)
+        })
+        recentAudioList.addView(TextView(this).apply {
+            text = "Tap the recording from your completed call. If it is not listed, use Select Recording File."
+            setPadding(0, 0, 0, 8)
+        })
+        candidates.take(12).forEach { candidate ->
+            recentAudioList.addView(Button(this).apply {
+                text = "${candidate.name}\n${formatAudioDate(maxOf(candidate.modifiedSeconds, candidate.addedSeconds))}"
+                setOnClickListener { uploadRecordingForContact(contact, candidate.uri) }
+            })
+        }
+        recentAudioList.addView(Button(this).apply {
+            text = "Select Recording File"
+            setOnClickListener {
+                selectedContact = contact
+                pickRecording()
+            }
+        })
+    }
+
+    private fun renderAudioScanHelp(message: String) {
+        recentAudioList.removeAllViews()
+        recentAudioList.addView(TextView(this).apply {
+            text = "$message\n\nReason: Android does not let normal apps read every call recording folder. If your recorder saves inside MIUI/Phone/Recorder private storage, automatic scan cannot see it.\n\nBest fix: open phone Recorder/File Manager, find the call recording, then use Select Recording File here."
+            setPadding(0, 18, 0, 8)
+        })
+        recentAudioList.addView(Button(this).apply {
+            text = "Select Recording File"
+            setOnClickListener { pickRecording() }
+        })
     }
 
     private fun uploadRecordingForContact(contact: Contact, uri: Uri) {
@@ -561,6 +646,10 @@ class MainActivity : Activity() {
     }
 
     private fun findLatestAudioRecording(startedAtMs: Long): Uri? {
+        return recentAudioCandidates(startedAtMs).firstOrNull()?.uri
+    }
+
+    private fun recentAudioCandidates(startedAtMs: Long): List<AudioCandidate> {
         val collection = if (Build.VERSION.SDK_INT >= 29) {
             MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         } else {
@@ -572,35 +661,54 @@ class MainActivity : Activity() {
             MediaStore.Audio.Media.DATE_ADDED,
             MediaStore.Audio.Media.DATE_MODIFIED
         )
-        val startSeconds = (startedAtMs / 1000) - 120
-        val selection = "${MediaStore.Audio.Media.DATE_ADDED} >= ? OR ${MediaStore.Audio.Media.DATE_MODIFIED} >= ?"
+        val startSeconds = ((startedAtMs.takeIf { it > 0L } ?: (System.currentTimeMillis() - 60 * 60 * 1000)) / 1000) - 600
+        val selection = "(${MediaStore.Audio.Media.DATE_ADDED} >= ? OR ${MediaStore.Audio.Media.DATE_MODIFIED} >= ?)"
         val selectionArgs = arrayOf(startSeconds.toString(), startSeconds.toString())
         val sortOrder = "${MediaStore.Audio.Media.DATE_MODIFIED} DESC, ${MediaStore.Audio.Media.DATE_ADDED} DESC"
+        val candidates = mutableListOf<AudioCandidate>()
 
         contentResolver.query(collection, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
             val idIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
             val nameIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+            val addedIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
+            val modifiedIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_MODIFIED)
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idIndex)
-                val name = cursor.getString(nameIndex).lowercase()
-                val looksLikeRecording = listOf(
-                    "call",
-                    "record",
-                    "rec",
-                    "phone",
-                    ".mp3",
-                    ".m4a",
-                    ".aac",
-                    ".amr",
-                    ".wav",
-                    ".ogg"
-                ).any { name.contains(it) }
-                if (looksLikeRecording || cursor.count == 1) {
-                    return Uri.withAppendedPath(collection, id.toString())
-                }
+                candidates.add(
+                    AudioCandidate(
+                        uri = Uri.withAppendedPath(collection, id.toString()),
+                        name = cursor.getString(nameIndex) ?: "audio-file",
+                        addedSeconds = cursor.getLong(addedIndex),
+                        modifiedSeconds = cursor.getLong(modifiedIndex)
+                    )
+                )
             }
         }
-        return null
+        if (candidates.isNotEmpty()) return candidates
+
+        contentResolver.query(collection, projection, null, null, sortOrder)?.use { cursor ->
+            val idIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+            val nameIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+            val addedIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
+            val modifiedIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_MODIFIED)
+            while (cursor.moveToNext() && candidates.size < 12) {
+                val id = cursor.getLong(idIndex)
+                candidates.add(
+                    AudioCandidate(
+                        uri = Uri.withAppendedPath(collection, id.toString()),
+                        name = cursor.getString(nameIndex) ?: "audio-file",
+                        addedSeconds = cursor.getLong(addedIndex),
+                        modifiedSeconds = cursor.getLong(modifiedIndex)
+                    )
+                )
+            }
+        }
+        return candidates
+    }
+
+    private fun formatAudioDate(seconds: Long): String {
+        if (seconds <= 0L) return "Unknown time"
+        return SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(seconds * 1000))
     }
 
     private fun displayName(uri: Uri): String {
