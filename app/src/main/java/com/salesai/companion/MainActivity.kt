@@ -31,6 +31,8 @@ data class CallSummary(
     val lead: String,
     val score: String,
     val nextAction: String,
+    val summary: String,
+    val transcript: String,
     val error: String
 )
 
@@ -41,12 +43,18 @@ class MainActivity : Activity() {
     private var calls = mutableListOf<CallSummary>()
     private var selectedContact: Contact? = null
     private var pendingCallContact: Contact? = null
+    private var readyToUploadContact: Contact? = null
+    private var readyToUploadStartedAt: Long = 0L
     private var callStartedAt: Long = 0L
     private var autoUploadTried = false
     private var autoUploadRunning = false
 
     private lateinit var serverUrl: EditText
+    private lateinit var customerNameInput: EditText
+    private lateinit var customerPhoneInput: EditText
+    private lateinit var customerNotesInput: EditText
     private lateinit var status: TextView
+    private lateinit var recentCallPanel: LinearLayout
     private lateinit var contactList: LinearLayout
     private lateinit var dashboardList: LinearLayout
 
@@ -63,9 +71,17 @@ class MainActivity : Activity() {
             hint = "Server URL"
             setText("http://10.161.118.14:8000")
         }
+        customerNameInput = EditText(this).apply { hint = "Customer name" }
+        customerPhoneInput = EditText(this).apply {
+            hint = "Phone number"
+            inputType = android.text.InputType.TYPE_CLASS_PHONE
+        }
+        customerNotesInput = EditText(this).apply { hint = "Notes" }
+        val saveCustomerButton = Button(this).apply { text = "Save Customer" }
         val syncButton = Button(this).apply { text = "Sync Customers" }
         val dashboardButton = Button(this).apply { text = "Refresh Dashboard" }
         status = TextView(this).apply { text = "Ready" }
+        recentCallPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         contactList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         dashboardList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
@@ -80,8 +96,15 @@ class MainActivity : Activity() {
             textSize = 24f
         })
         root.addView(serverUrl)
+        root.addView(sectionTitle("Add Customer"))
+        root.addView(customerNameInput)
+        root.addView(customerPhoneInput)
+        root.addView(customerNotesInput)
+        root.addView(saveCustomerButton)
         root.addView(buttonRow)
         root.addView(status)
+        root.addView(sectionTitle("After Call Upload"))
+        root.addView(recentCallPanel)
         root.addView(sectionTitle("Customers"))
         root.addView(contactList)
         root.addView(sectionTitle("Call Analysis Dashboard"))
@@ -89,9 +112,11 @@ class MainActivity : Activity() {
         scrollView.addView(root)
         setContentView(scrollView)
 
+        saveCustomerButton.setOnClickListener { saveCustomer() }
         syncButton.setOnClickListener { syncContacts() }
         dashboardButton.setOnClickListener { refreshDashboard() }
         requestAudioPermission()
+        renderRecentCallPanel()
     }
 
     private fun baseUrl(): String {
@@ -120,6 +145,58 @@ class MainActivity : Activity() {
                 status.text = "Loaded ${contacts.size} customer(s)."
             } catch (exc: Exception) {
                 status.text = "Sync failed: ${errorMessage(exc)}"
+            }
+        }
+    }
+
+    private fun saveCustomer() {
+        val name = customerNameInput.text.toString().trim()
+        val phone = customerPhoneInput.text.toString().trim()
+        val notes = customerNotesInput.text.toString().trim()
+
+        if (name.isBlank() || phone.isBlank()) {
+            status.text = "Enter customer name and phone number."
+            return
+        }
+
+        status.text = "Saving customer..."
+        scope.launch {
+            try {
+                val requestBody = MultipartBody.Builder()
+                    .setType(MultipartBody.FORM)
+                    .addFormDataPart("customer_name", name)
+                    .addFormDataPart("phone", phone)
+                    .addFormDataPart("notes", notes)
+                    .build()
+
+                val result = withContext(Dispatchers.IO) {
+                    client.newCall(
+                        Request.Builder()
+                            .url("${baseUrl()}/contacts")
+                            .post(requestBody)
+                            .build()
+                    ).execute().use { response ->
+                        val responseBody = response.body?.string().orEmpty()
+                        if (!response.isSuccessful) throw IOException(responseBody)
+                        responseBody
+                    }
+                }
+
+                val row = JSONObject(result)
+                val savedContact = Contact(
+                    id = row.optString("id"),
+                    name = row.optString("customer_name", name),
+                    phone = row.optString("phone", phone)
+                )
+                contacts.removeAll { it.id == savedContact.id || it.phone == savedContact.phone }
+                contacts.add(0, savedContact)
+                customerNameInput.setText("")
+                customerPhoneInput.setText("")
+                customerNotesInput.setText("")
+                renderContacts()
+                status.text = "Saved ${savedContact.name}. Tap Call when ready."
+            } catch (exc: Exception) {
+                status.text = "Save failed: ${errorMessage(exc)}"
             }
         }
     }
@@ -179,17 +256,17 @@ class MainActivity : Activity() {
                 textSize = 18f
             })
             box.addView(Button(this).apply {
-                text = "Call"
+                text = "Call ${contact.name}"
                 setOnClickListener {
                     selectedContact = contact
                     callCustomer(contact)
                 }
             })
             box.addView(Button(this).apply {
-                text = "Upload Latest Recording"
+                text = "Find & Upload Latest Recording"
                 setOnClickListener {
                     selectedContact = contact
-                    uploadLatestRecording(contact, callStartedAt)
+                    uploadLatestRecording(contact, readyToUploadStartedAt.takeIf { it > 0L } ?: callStartedAt)
                 }
             })
             box.addView(Button(this).apply {
@@ -205,9 +282,13 @@ class MainActivity : Activity() {
 
     private fun callCustomer(contact: Contact) {
         pendingCallContact = contact
+        readyToUploadContact = null
+        readyToUploadStartedAt = 0L
         callStartedAt = System.currentTimeMillis()
         autoUploadTried = false
         autoUploadRunning = false
+        renderRecentCallPanel()
+        status.text = "Calling ${contact.name}. Come back here after the call to upload recording."
         val uri = Uri.parse("tel:+91${contact.phone.filter { it.isDigit() }.takeLast(10)}")
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
             startActivity(Intent(Intent.ACTION_CALL, uri))
@@ -220,8 +301,45 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         val contact = pendingCallContact ?: return
-        if (autoUploadTried || autoUploadRunning || callStartedAt == 0L) return
-        startAutoUploadPolling(contact, callStartedAt)
+        if (callStartedAt == 0L || System.currentTimeMillis() - callStartedAt < 2_000L) return
+        readyToUploadContact = contact
+        readyToUploadStartedAt = callStartedAt
+        pendingCallContact = null
+        selectedContact = contact
+        renderRecentCallPanel()
+        status.text = "Call finished for ${contact.name}. Tap Find & Upload Call Recording."
+    }
+
+    private fun renderRecentCallPanel() {
+        recentCallPanel.removeAllViews()
+        val contact = readyToUploadContact
+        if (contact == null) {
+            recentCallPanel.addView(TextView(this).apply {
+                text = "No completed call waiting for upload."
+                setPadding(0, 0, 0, 12)
+            })
+            return
+        }
+
+        recentCallPanel.addView(TextView(this).apply {
+            text = "${contact.name} - ${contact.phone}\nCall completed. Upload this customer's recording now."
+            textSize = 16f
+            setPadding(0, 0, 0, 10)
+        })
+        recentCallPanel.addView(Button(this).apply {
+            text = "Find & Upload Call Recording"
+            setOnClickListener {
+                selectedContact = contact
+                uploadLatestRecording(contact, readyToUploadStartedAt)
+            }
+        })
+        recentCallPanel.addView(Button(this).apply {
+            text = "Select Recording File"
+            setOnClickListener {
+                selectedContact = contact
+                pickRecording()
+            }
+        })
     }
 
     private fun startAutoUploadPolling(contact: Contact, startedAtMs: Long) {
@@ -340,6 +458,11 @@ class MainActivity : Activity() {
                 if (pendingCallContact?.id == contact.id) {
                     pendingCallContact = null
                 }
+                if (readyToUploadContact?.id == contact.id) {
+                    readyToUploadContact = null
+                    readyToUploadStartedAt = 0L
+                    renderRecentCallPanel()
+                }
                 refreshDashboard(showLoading = false)
             } catch (exc: Exception) {
                 status.text = "Upload failed: ${errorMessage(exc)}"
@@ -384,6 +507,11 @@ class MainActivity : Activity() {
                     lead = analysis.optString("customer_intent", "Cold"),
                     score = analysis.optString("agent_score", analysis.optString("sales_score", "0")),
                     nextAction = analysis.optString("next_action", ""),
+                    summary = analysis.optString("summary", "")
+                        .ifBlank { analysis.optString("call_summary", "") }
+                        .ifBlank { row.optString("summary", "") },
+                    transcript = row.optString("transcript", "")
+                        .ifBlank { analysis.optString("transcript", "") },
                     error = row.optString("error", "")
                 )
             )
@@ -417,7 +545,9 @@ class MainActivity : Activity() {
                     append("Date: ${formatDate(call.createdAt)}\n")
                     append("File: ${call.fileName}\n")
                     append("Lead: ${call.lead} | Score: ${call.score} | Status: ${call.status}\n")
+                    if (call.summary.isNotBlank()) append("Summary: ${call.summary}\n")
                     if (call.nextAction.isNotBlank()) append("Next: ${call.nextAction}\n")
+                    if (call.transcript.isNotBlank()) append("Transcript: ${call.transcript.take(350)}\n")
                     if (call.error.isNotBlank()) append("Error: ${call.error}\n")
                 }
                 textSize = 15f
