@@ -22,11 +22,23 @@ import org.json.JSONObject
 import java.io.IOException
 
 data class Contact(val id: String, val name: String, val phone: String)
+data class CallSummary(
+    val customerName: String,
+    val phone: String,
+    val fileName: String,
+    val createdAt: String,
+    val status: String,
+    val lead: String,
+    val score: String,
+    val nextAction: String,
+    val error: String
+)
 
 class MainActivity : Activity() {
     private val client = OkHttpClient()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var contacts = mutableListOf<Contact>()
+    private var calls = mutableListOf<CallSummary>()
     private var selectedContact: Contact? = null
     private var pendingCallContact: Contact? = null
     private var callStartedAt: Long = 0L
@@ -35,10 +47,12 @@ class MainActivity : Activity() {
     private lateinit var serverUrl: EditText
     private lateinit var status: TextView
     private lateinit var contactList: LinearLayout
+    private lateinit var dashboardList: LinearLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        val scrollView = ScrollView(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(28, 28, 28, 28)
@@ -49,20 +63,33 @@ class MainActivity : Activity() {
             setText("http://10.161.118.14:8000")
         }
         val syncButton = Button(this).apply { text = "Sync Customers" }
+        val dashboardButton = Button(this).apply { text = "Refresh Dashboard" }
         status = TextView(this).apply { text = "Ready" }
         contactList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        dashboardList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        val buttonRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(syncButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(dashboardButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        }
 
         root.addView(TextView(this).apply {
             text = "Sales AI Companion"
             textSize = 24f
         })
         root.addView(serverUrl)
-        root.addView(syncButton)
+        root.addView(buttonRow)
         root.addView(status)
+        root.addView(sectionTitle("Customers"))
         root.addView(contactList)
-        setContentView(root)
+        root.addView(sectionTitle("Call Analysis Dashboard"))
+        root.addView(dashboardList)
+        scrollView.addView(root)
+        setContentView(scrollView)
 
         syncButton.setOnClickListener { syncContacts() }
+        dashboardButton.setOnClickListener { refreshDashboard() }
         requestAudioPermission()
     }
 
@@ -88,6 +115,7 @@ class MainActivity : Activity() {
                 contacts.clear()
                 contacts.addAll(parseContacts(result))
                 renderContacts()
+                refreshDashboard(showLoading = false)
                 status.text = "Loaded ${contacts.size} customer(s)."
             } catch (exc: Exception) {
                 status.text = "Sync failed: ${errorMessage(exc)}"
@@ -123,6 +151,14 @@ class MainActivity : Activity() {
 
     private fun errorMessage(exc: Exception): String {
         return exc.message?.takeIf { it.isNotBlank() } ?: exc.javaClass.simpleName
+    }
+
+    private fun sectionTitle(title: String): TextView {
+        return TextView(this).apply {
+            text = title
+            textSize = 20f
+            setPadding(0, 28, 0, 10)
+        }
     }
 
     private fun renderContacts() {
@@ -279,10 +315,94 @@ class MainActivity : Activity() {
                 if (pendingCallContact?.id == contact.id) {
                     pendingCallContact = null
                 }
+                refreshDashboard(showLoading = false)
             } catch (exc: Exception) {
                 status.text = "Upload failed: ${errorMessage(exc)}"
             }
         }
+    }
+
+    private fun refreshDashboard(showLoading: Boolean = true) {
+        if (showLoading) status.text = "Loading dashboard..."
+        scope.launch {
+            try {
+                val body = withContext(Dispatchers.IO) {
+                    client.newCall(Request.Builder().url("${baseUrl()}/calls").build()).execute().use { response ->
+                        val responseBody = response.body?.string().orEmpty()
+                        if (!response.isSuccessful) throw IOException(responseBody)
+                        responseBody
+                    }
+                }
+                calls.clear()
+                calls.addAll(parseCalls(body))
+                renderDashboard()
+                if (showLoading) status.text = "Dashboard loaded (${calls.size} call(s))."
+            } catch (exc: Exception) {
+                if (showLoading) status.text = "Dashboard failed: ${errorMessage(exc)}"
+            }
+        }
+    }
+
+    private fun parseCalls(body: String): List<CallSummary> {
+        val rows = JSONArray(body)
+        val parsedCalls = mutableListOf<CallSummary>()
+        for (i in 0 until rows.length()) {
+            val row = rows.optJSONObject(i) ?: continue
+            val analysis = row.optJSONObject("analysis") ?: JSONObject()
+            parsedCalls.add(
+                CallSummary(
+                    customerName = row.optString("customer_name", "").ifBlank { "Unknown customer" },
+                    phone = row.optString("phone", ""),
+                    fileName = row.optString("file_name", ""),
+                    createdAt = row.optString("created_at", ""),
+                    status = row.optString("status", ""),
+                    lead = analysis.optString("customer_intent", "Cold"),
+                    score = analysis.optString("agent_score", analysis.optString("sales_score", "0")),
+                    nextAction = analysis.optString("next_action", ""),
+                    error = row.optString("error", "")
+                )
+            )
+        }
+        return parsedCalls
+    }
+
+    private fun renderDashboard() {
+        dashboardList.removeAllViews()
+        val doneCount = calls.count { it.status == "done" }
+        val failedCount = calls.count { it.status == "failed" }
+        val hotCount = calls.count { it.lead.equals("hot", ignoreCase = true) }
+        val warmCount = calls.count { it.lead.equals("warm", ignoreCase = true) }
+        val coldCount = calls.count { it.lead.equals("cold", ignoreCase = true) }
+
+        dashboardList.addView(TextView(this).apply {
+            text = "Total: ${calls.size} | Done: $doneCount | Failed: $failedCount\nHot: $hotCount | Warm: $warmCount | Cold: $coldCount"
+            textSize = 16f
+            setPadding(0, 0, 0, 18)
+        })
+
+        if (calls.isEmpty()) {
+            dashboardList.addView(TextView(this).apply { text = "No call analysis yet." })
+            return
+        }
+
+        calls.take(25).forEach { call ->
+            dashboardList.addView(TextView(this).apply {
+                text = buildString {
+                    append("${call.customerName} - ${call.phone}\n")
+                    append("Date: ${formatDate(call.createdAt)}\n")
+                    append("File: ${call.fileName}\n")
+                    append("Lead: ${call.lead} | Score: ${call.score} | Status: ${call.status}\n")
+                    if (call.nextAction.isNotBlank()) append("Next: ${call.nextAction}\n")
+                    if (call.error.isNotBlank()) append("Error: ${call.error}\n")
+                }
+                textSize = 15f
+                setPadding(0, 12, 0, 12)
+            })
+        }
+    }
+
+    private fun formatDate(value: String): String {
+        return value.take(19).replace("T", " ")
     }
 
     private fun findLatestAudioRecording(startedAtMs: Long): Uri? {
