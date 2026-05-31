@@ -78,13 +78,15 @@ class MainActivity : Activity() {
         status.text = "Syncing customers..."
         scope.launch {
             try {
-                val response = withContext(Dispatchers.IO) {
-                    client.newCall(Request.Builder().url("${baseUrl()}/contacts").build()).execute()
+                val result = withContext(Dispatchers.IO) {
+                    client.newCall(Request.Builder().url("${baseUrl()}/contacts").build()).execute().use { response ->
+                        val body = response.body?.string().orEmpty()
+                        if (!response.isSuccessful) throw IOException(body)
+                        body
+                    }
                 }
-                val body = response.body?.string().orEmpty()
-                if (!response.isSuccessful) throw IOException(body)
                 contacts.clear()
-                contacts.addAll(parseContacts(body))
+                contacts.addAll(parseContacts(result))
                 renderContacts()
                 status.text = "Loaded ${contacts.size} customer(s)."
             } catch (exc: Exception) {
@@ -257,16 +259,22 @@ class MainActivity : Activity() {
                     )
                     .build()
 
-                val response = withContext(Dispatchers.IO) {
+                val errorBody = withContext(Dispatchers.IO) {
                     client.newCall(
                         Request.Builder()
                             .url("${baseUrl()}/contact-call")
                             .post(requestBody)
                             .build()
-                    ).execute()
+                    ).execute().use { response ->
+                        if (response.isSuccessful) {
+                            null
+                        } else {
+                            response.body?.string().orEmpty()
+                        }
+                    }
                 }
 
-                if (!response.isSuccessful) throw IOException(response.body?.string().orEmpty())
+                if (errorBody != null) throw IOException(errorBody)
                 status.text = "Uploaded and analyzed for ${contact.name}."
                 if (pendingCallContact?.id == contact.id) {
                     pendingCallContact = null
