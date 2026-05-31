@@ -19,13 +19,19 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          printf "sdk.dir=%s\n" "$ANDROID_HOME" > local.properties
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "8.10.2"
 
       - name: Build debug APK
-        run: gradle assembleDebug
+        run: gradle assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v5
