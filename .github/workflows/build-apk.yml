@@ -34,9 +34,20 @@ jobs:
           gradle-version: "8.10.2"
 
       - name: Build debug APK
-        run: gradle assembleDebug --stacktrace
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle assembleDebug --stacktrace 2>&1 | tee build.log
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: android-build-log
+          path: build.log
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v5
         with:
           name: sales-ai-companion-debug-apk
