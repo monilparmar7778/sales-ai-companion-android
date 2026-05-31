@@ -43,6 +43,7 @@ class MainActivity : Activity() {
     private var pendingCallContact: Contact? = null
     private var callStartedAt: Long = 0L
     private var autoUploadTried = false
+    private var autoUploadRunning = false
 
     private lateinit var serverUrl: EditText
     private lateinit var status: TextView
@@ -206,6 +207,7 @@ class MainActivity : Activity() {
         pendingCallContact = contact
         callStartedAt = System.currentTimeMillis()
         autoUploadTried = false
+        autoUploadRunning = false
         val uri = Uri.parse("tel:+91${contact.phone.filter { it.isDigit() }.takeLast(10)}")
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
             startActivity(Intent(Intent.ACTION_CALL, uri))
@@ -218,12 +220,35 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         val contact = pendingCallContact ?: return
-        if (autoUploadTried || callStartedAt == 0L) return
-        val secondsSinceCallStarted = (System.currentTimeMillis() - callStartedAt) / 1000
-        if (secondsSinceCallStarted >= 20) {
-            autoUploadTried = true
-            status.text = "Checking latest recording for ${contact.name}..."
-            uploadLatestRecording(contact, callStartedAt)
+        if (autoUploadTried || autoUploadRunning || callStartedAt == 0L) return
+        startAutoUploadPolling(contact, callStartedAt)
+    }
+
+    private fun startAutoUploadPolling(contact: Contact, startedAtMs: Long) {
+        autoUploadTried = true
+        autoUploadRunning = true
+        scope.launch {
+            try {
+                val waitMs = (10_000L - (System.currentTimeMillis() - startedAtMs)).coerceAtLeast(0L)
+                if (waitMs > 0L) delay(waitMs)
+
+                repeat(12) { attempt ->
+                    status.text = "Auto-checking call recording for ${contact.name} (${attempt + 1}/12)..."
+                    val latest = withContext(Dispatchers.IO) { findLatestAudioRecording(startedAtMs) }
+                    if (latest != null) {
+                        status.text = "Recording found. Uploading automatically..."
+                        uploadRecordingForContact(contact, latest)
+                        return@launch
+                    }
+                    delay(5_000L)
+                }
+
+                status.text = "Auto upload did not find a new recording. Use Upload Recording manually."
+            } catch (exc: Exception) {
+                status.text = "Auto upload failed: ${errorMessage(exc)}"
+            } finally {
+                autoUploadRunning = false
+            }
         }
     }
 
@@ -417,7 +442,7 @@ class MainActivity : Activity() {
             MediaStore.Audio.Media.DATE_ADDED,
             MediaStore.Audio.Media.DATE_MODIFIED
         )
-        val startSeconds = (startedAtMs / 1000) - 60
+        val startSeconds = (startedAtMs / 1000) - 120
         val selection = "${MediaStore.Audio.Media.DATE_ADDED} >= ? OR ${MediaStore.Audio.Media.DATE_MODIFIED} >= ?"
         val selectionArgs = arrayOf(startSeconds.toString(), startSeconds.toString())
         val sortOrder = "${MediaStore.Audio.Media.DATE_MODIFIED} DESC, ${MediaStore.Audio.Media.DATE_ADDED} DESC"
@@ -428,7 +453,18 @@ class MainActivity : Activity() {
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idIndex)
                 val name = cursor.getString(nameIndex).lowercase()
-                val looksLikeRecording = listOf("call", "record", "rec", "phone").any { name.contains(it) }
+                val looksLikeRecording = listOf(
+                    "call",
+                    "record",
+                    "rec",
+                    "phone",
+                    ".mp3",
+                    ".m4a",
+                    ".aac",
+                    ".amr",
+                    ".wav",
+                    ".ogg"
+                ).any { name.contains(it) }
                 if (looksLikeRecording || cursor.count == 1) {
                     return Uri.withAppendedPath(collection, id.toString())
                 }
