@@ -18,6 +18,7 @@ import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
+import org.json.JSONObject
 import java.io.IOException
 
 data class Contact(val id: String, val name: String, val phone: String)
@@ -65,7 +66,13 @@ class MainActivity : Activity() {
         requestAudioPermission()
     }
 
-    private fun baseUrl(): String = serverUrl.text.toString().trim().trimEnd('/')
+    private fun baseUrl(): String {
+        val enteredUrl = serverUrl.text.toString().trim().trimEnd('/')
+        return listOf("/contacts", "/calls", "/crm-page")
+            .firstOrNull { enteredUrl.endsWith(it) }
+            ?.let { enteredUrl.removeSuffix(it).trimEnd('/') }
+            ?: enteredUrl
+    }
 
     private fun syncContacts() {
         status.text = "Syncing customers..."
@@ -76,24 +83,44 @@ class MainActivity : Activity() {
                 }
                 val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) throw IOException(body)
-                val rows = JSONArray(body)
                 contacts.clear()
-                for (i in 0 until rows.length()) {
-                    val row = rows.getJSONObject(i)
-                    contacts.add(
-                        Contact(
-                            id = row.getString("id"),
-                            name = row.optString("customer_name"),
-                            phone = row.optString("phone")
-                        )
-                    )
-                }
+                contacts.addAll(parseContacts(body))
                 renderContacts()
                 status.text = "Loaded ${contacts.size} customer(s)."
             } catch (exc: Exception) {
-                status.text = "Sync failed: ${exc.message}"
+                status.text = "Sync failed: ${errorMessage(exc)}"
             }
         }
+    }
+
+    private fun parseContacts(body: String): List<Contact> {
+        val rows = when {
+            body.trim().startsWith("[") -> JSONArray(body)
+            else -> JSONObject(body).optJSONArray("contacts")
+                ?: JSONObject(body).optJSONArray("data")
+                ?: throw IOException("Server did not return a contacts list")
+        }
+
+        val parsedContacts = mutableListOf<Contact>()
+        for (i in 0 until rows.length()) {
+            val row = rows.optJSONObject(i) ?: continue
+            val id = row.optString("id", "").ifBlank { row.optString("contact_id", "") }
+            val name = row.optString("customer_name", "")
+                .ifBlank { row.optString("name", "") }
+                .ifBlank { "Customer ${i + 1}" }
+            val phone = row.optString("phone", "")
+                .ifBlank { row.optString("mobile", "") }
+                .ifBlank { row.optString("phone_number", "") }
+
+            if (id.isNotBlank()) {
+                parsedContacts.add(Contact(id = id, name = name, phone = phone))
+            }
+        }
+        return parsedContacts
+    }
+
+    private fun errorMessage(exc: Exception): String {
+        return exc.message?.takeIf { it.isNotBlank() } ?: exc.javaClass.simpleName
     }
 
     private fun renderContacts() {
@@ -205,7 +232,7 @@ class MainActivity : Activity() {
                 }
                 uploadRecordingForContact(contact, latest)
             } catch (exc: Exception) {
-                status.text = "Latest recording upload failed: ${exc.message}"
+                status.text = "Latest recording upload failed: ${errorMessage(exc)}"
             }
         }
     }
@@ -245,7 +272,7 @@ class MainActivity : Activity() {
                     pendingCallContact = null
                 }
             } catch (exc: Exception) {
-                status.text = "Upload failed: ${exc.message}"
+                status.text = "Upload failed: ${errorMessage(exc)}"
             }
         }
     }
