@@ -46,6 +46,17 @@ jobs:
           name: android-build-log
           path: build.log
 
+      - name: Publish build log summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### Android build failure"
+            echo '```text'
+            tail -120 build.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v5
