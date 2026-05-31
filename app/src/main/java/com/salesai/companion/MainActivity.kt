@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.widget.*
@@ -19,6 +20,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -57,6 +59,7 @@ class MainActivity : Activity() {
     private lateinit var customerPhoneInput: EditText
     private lateinit var customerNotesInput: EditText
     private lateinit var status: TextView
+    private lateinit var folderInfo: TextView
     private lateinit var recentCallPanel: LinearLayout
     private lateinit var recentAudioList: LinearLayout
     private lateinit var contactList: LinearLayout
@@ -85,6 +88,7 @@ class MainActivity : Activity() {
         val syncButton = Button(this).apply { text = "Sync Customers" }
         val dashboardButton = Button(this).apply { text = "Refresh Dashboard" }
         status = TextView(this).apply { text = "Ready" }
+        folderInfo = TextView(this)
         recentCallPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         recentAudioList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         contactList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -108,6 +112,8 @@ class MainActivity : Activity() {
         root.addView(saveCustomerButton)
         root.addView(buttonRow)
         root.addView(status)
+        root.addView(sectionTitle("Recording Folder"))
+        root.addView(folderInfo)
         root.addView(sectionTitle("After Call Upload"))
         root.addView(recentCallPanel)
         root.addView(recentAudioList)
@@ -122,6 +128,7 @@ class MainActivity : Activity() {
         syncButton.setOnClickListener { syncContacts() }
         dashboardButton.setOnClickListener { refreshDashboard() }
         requestAudioPermission()
+        ensureRecordingFolder()
         renderRecentCallPanel()
     }
 
@@ -243,6 +250,16 @@ class MainActivity : Activity() {
             textSize = 20f
             setPadding(0, 28, 0, 10)
         }
+    }
+
+    private fun recordingFolder(): File {
+        return File(getExternalFilesDir(Environment.DIRECTORY_MUSIC), "SalesAIRecordings")
+    }
+
+    private fun ensureRecordingFolder() {
+        val folder = recordingFolder()
+        if (!folder.exists()) folder.mkdirs()
+        folderInfo.text = "App folder created:\n${folder.absolutePath}\n\nFor true automatic upload, set your phone call recorder app to save recordings here. If your phone recorder cannot choose this folder, Android will require manual Select Recording File."
     }
 
     private fun renderContacts() {
@@ -422,7 +439,9 @@ class MainActivity : Activity() {
         requestAudioPermission()
         scope.launch {
             try {
-                val latest = withContext(Dispatchers.IO) { findLatestAudioRecording(startedAtMs) }
+                val latest = withContext(Dispatchers.IO) {
+                    findLatestAppFolderRecording(startedAtMs) ?: findLatestAudioRecording(startedAtMs)
+                }
                 if (latest == null) {
                     status.text = "No recording auto-found. Scanning visible phone audio..."
                     scanRecordingsForContact(contact, startedAtMs)
@@ -449,9 +468,11 @@ class MainActivity : Activity() {
                     return@launch
                 }
 
-                val candidates = withContext(Dispatchers.IO) { recentAudioCandidates(startedAtMs) }
+                val candidates = withContext(Dispatchers.IO) {
+                    appFolderCandidates(startedAtMs) + recentAudioCandidates(startedAtMs)
+                }.distinctBy { it.uri.toString() }
                 if (candidates.isEmpty()) {
-                    renderAudioScanHelp("No audio file is visible to the app. Your phone recorder may save calls in a private/system folder.")
+                    renderAudioScanHelp("No recording was found in the SalesAI folder or visible phone audio.")
                     status.text = "No visible audio found. Use Select Recording File."
                     return@launch
                 }
@@ -494,7 +515,7 @@ class MainActivity : Activity() {
     private fun renderAudioScanHelp(message: String) {
         recentAudioList.removeAllViews()
         recentAudioList.addView(TextView(this).apply {
-            text = "$message\n\nReason: Android does not let normal apps read every call recording folder. If your recorder saves inside MIUI/Phone/Recorder private storage, automatic scan cannot see it.\n\nBest fix: open phone Recorder/File Manager, find the call recording, then use Select Recording File here."
+            text = "$message\n\nThe app has its own folder:\n${recordingFolder().absolutePath}\n\nAndroid does not let this app control the Phone app recorder. If your recorder supports changing save location, set it to this SalesAI folder. If it saves inside private MIUI/Phone/Recorder storage, use Select Recording File once and the app will copy that file into the SalesAI folder."
             setPadding(0, 18, 0, 8)
         })
         recentAudioList.addView(Button(this).apply {
@@ -512,6 +533,7 @@ class MainActivity : Activity() {
                 val bytes = withContext(Dispatchers.IO) {
                     contentResolver.openInputStream(uri)?.use { it.readBytes() }
                 } ?: throw IOException("Could not read recording")
+                withContext(Dispatchers.IO) { copyRecordingToAppFolder(fileName, bytes) }
 
                 val requestBody = MultipartBody.Builder()
                     .setType(MultipartBody.FORM)
@@ -649,6 +671,28 @@ class MainActivity : Activity() {
         return recentAudioCandidates(startedAtMs).firstOrNull()?.uri
     }
 
+    private fun findLatestAppFolderRecording(startedAtMs: Long): Uri? {
+        return appFolderCandidates(startedAtMs).firstOrNull()?.uri
+    }
+
+    private fun appFolderCandidates(startedAtMs: Long): List<AudioCandidate> {
+        val folder = recordingFolder()
+        if (!folder.exists()) folder.mkdirs()
+        val startMs = (startedAtMs.takeIf { it > 0L } ?: (System.currentTimeMillis() - 60 * 60 * 1000)) - 10 * 60 * 1000
+        return folder.listFiles()
+            ?.filter { it.isFile && isAudioFileName(it.name) && it.lastModified() >= startMs }
+            ?.sortedByDescending { it.lastModified() }
+            ?.map {
+                AudioCandidate(
+                    uri = Uri.fromFile(it),
+                    name = it.name,
+                    addedSeconds = it.lastModified() / 1000,
+                    modifiedSeconds = it.lastModified() / 1000
+                )
+            }
+            ?: emptyList()
+    }
+
     private fun recentAudioCandidates(startedAtMs: Long): List<AudioCandidate> {
         val collection = if (Build.VERSION.SDK_INT >= 29) {
             MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
@@ -704,6 +748,19 @@ class MainActivity : Activity() {
             }
         }
         return candidates
+    }
+
+    private fun isAudioFileName(name: String): Boolean {
+        val lower = name.lowercase(Locale.getDefault())
+        return listOf(".mp3", ".m4a", ".aac", ".amr", ".wav", ".ogg", ".3gp").any { lower.endsWith(it) }
+    }
+
+    private fun copyRecordingToAppFolder(fileName: String, bytes: ByteArray) {
+        val folder = recordingFolder()
+        if (!folder.exists()) folder.mkdirs()
+        val safeName = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "call-recording.m4a" }
+        val stampedName = "${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}_$safeName"
+        File(folder, stampedName).writeBytes(bytes)
     }
 
     private fun formatAudioDate(seconds: Long): String {
