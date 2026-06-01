@@ -394,12 +394,13 @@ class MainActivity : Activity() {
         }
         val telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
         unregisterCallStateListener()
-        phoneStateListener = object : PhoneStateListener() {
+        val listener = object : PhoneStateListener() {
             override fun onCallStateChanged(state: Int, phoneNumber: String?) {
                 runOnUiThread { handleCallStateChanged(state) }
             }
         }
-        telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
+        phoneStateListener = listener
+        telephonyManager.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
     }
 
     private fun unregisterCallStateListener() {
