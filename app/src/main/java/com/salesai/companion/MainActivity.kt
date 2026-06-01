@@ -53,6 +53,7 @@ class MainActivity : Activity() {
     private var callStartedAt: Long = 0L
     private var autoUploadTried = false
     private var autoUploadRunning = false
+    private var showingDashboard = false
 
     private lateinit var serverUrl: EditText
     private lateinit var customerNameInput: EditText
@@ -60,6 +61,8 @@ class MainActivity : Activity() {
     private lateinit var customerNotesInput: EditText
     private lateinit var status: TextView
     private lateinit var folderInfo: TextView
+    private lateinit var mainPage: LinearLayout
+    private lateinit var dashboardPage: LinearLayout
     private lateinit var recentCallPanel: LinearLayout
     private lateinit var recentAudioList: LinearLayout
     private lateinit var contactList: LinearLayout
@@ -87,8 +90,12 @@ class MainActivity : Activity() {
         val saveCustomerButton = Button(this).apply { text = "Save Customer" }
         val syncButton = Button(this).apply { text = "Sync Customers" }
         val dashboardButton = Button(this).apply { text = "Refresh Dashboard" }
+        val customerPageButton = Button(this).apply { text = "Customers" }
+        val dashboardPageButton = Button(this).apply { text = "Dashboard" }
         status = TextView(this).apply { text = "Ready" }
         folderInfo = TextView(this)
+        mainPage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        dashboardPage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         recentCallPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         recentAudioList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         contactList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -99,37 +106,54 @@ class MainActivity : Activity() {
             addView(syncButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(dashboardButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         }
+        val navRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(customerPageButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(dashboardPageButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        }
 
         root.addView(TextView(this).apply {
             text = "Sales AI Companion"
             textSize = 24f
         })
         root.addView(serverUrl)
-        root.addView(sectionTitle("Add Customer"))
-        root.addView(customerNameInput)
-        root.addView(customerPhoneInput)
-        root.addView(customerNotesInput)
-        root.addView(saveCustomerButton)
+        root.addView(navRow)
         root.addView(buttonRow)
         root.addView(status)
-        root.addView(sectionTitle("Recording Folder"))
-        root.addView(folderInfo)
-        root.addView(sectionTitle("After Call Upload"))
-        root.addView(recentCallPanel)
-        root.addView(recentAudioList)
-        root.addView(sectionTitle("Customers"))
-        root.addView(contactList)
-        root.addView(sectionTitle("Call Analysis Dashboard"))
-        root.addView(dashboardList)
+
+        mainPage.addView(sectionTitle("Add Customer"))
+        mainPage.addView(customerNameInput)
+        mainPage.addView(customerPhoneInput)
+        mainPage.addView(customerNotesInput)
+        mainPage.addView(saveCustomerButton)
+        mainPage.addView(sectionTitle("After Call"))
+        mainPage.addView(recentCallPanel)
+        mainPage.addView(recentAudioList)
+        mainPage.addView(sectionTitle("Customers"))
+        mainPage.addView(contactList)
+
+        dashboardPage.addView(sectionTitle("Call Analysis Dashboard"))
+        dashboardPage.addView(dashboardList)
+        dashboardPage.addView(sectionTitle("Recording Setup"))
+        dashboardPage.addView(folderInfo)
+
+        root.addView(mainPage)
+        root.addView(dashboardPage)
         scrollView.addView(root)
         setContentView(scrollView)
 
         saveCustomerButton.setOnClickListener { saveCustomer() }
         syncButton.setOnClickListener { syncContacts() }
         dashboardButton.setOnClickListener { refreshDashboard() }
+        customerPageButton.setOnClickListener { showMainPage() }
+        dashboardPageButton.setOnClickListener {
+            showDashboardPage()
+            refreshDashboard()
+        }
         requestAudioPermission()
         ensureRecordingFolder()
         renderRecentCallPanel()
+        showMainPage()
     }
 
     private fun baseUrl(): String {
@@ -259,7 +283,19 @@ class MainActivity : Activity() {
     private fun ensureRecordingFolder() {
         val folder = recordingFolder()
         if (!folder.exists()) folder.mkdirs()
-        folderInfo.text = "App folder created:\n${folder.absolutePath}\n\nFor true automatic upload, set your phone call recorder app to save recordings here. If your phone recorder cannot choose this folder, Android will require manual Select Recording File."
+        folderInfo.text = "Folder created:\n${folder.absolutePath}\n\nDirect phone-call recording cannot be forced by this app. For automatic upload, your phone recorder must save audio in a visible folder. If your recorder can change save location, choose this folder. Otherwise use Select Recording File after the call."
+    }
+
+    private fun showMainPage() {
+        showingDashboard = false
+        mainPage.visibility = android.view.View.VISIBLE
+        dashboardPage.visibility = android.view.View.GONE
+    }
+
+    private fun showDashboardPage() {
+        showingDashboard = true
+        mainPage.visibility = android.view.View.GONE
+        dashboardPage.visibility = android.view.View.VISIBLE
     }
 
     private fun renderContacts() {
@@ -345,7 +381,7 @@ class MainActivity : Activity() {
         }
 
         recentCallPanel.addView(TextView(this).apply {
-            text = "${contact.name} - ${contact.phone}\nCall completed. Upload this customer's recording now."
+            text = "${contact.name} - ${contact.phone}\nCall completed. Upload this customer's recording."
             textSize = 16f
             setPadding(0, 0, 0, 10)
         })
@@ -515,7 +551,7 @@ class MainActivity : Activity() {
     private fun renderAudioScanHelp(message: String) {
         recentAudioList.removeAllViews()
         recentAudioList.addView(TextView(this).apply {
-            text = "$message\n\nThe app has its own folder:\n${recordingFolder().absolutePath}\n\nAndroid does not let this app control the Phone app recorder. If your recorder supports changing save location, set it to this SalesAI folder. If it saves inside private MIUI/Phone/Recorder storage, use Select Recording File once and the app will copy that file into the SalesAI folder."
+            text = "$message\n\nUse Select Recording File and choose the recording from Recorder/File Manager.\n\nWhy: Android does not allow this app to control or read hidden Phone app recording storage. True automatic recording needs cloud calling/VoIP integration."
             setPadding(0, 18, 0, 8)
         })
         recentAudioList.addView(Button(this).apply {
@@ -571,6 +607,7 @@ class MainActivity : Activity() {
                     renderRecentCallPanel()
                 }
                 refreshDashboard(showLoading = false)
+                showDashboardPage()
             } catch (exc: Exception) {
                 status.text = "Upload failed: ${errorMessage(exc)}"
             }
