@@ -13,6 +13,8 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.telephony.PhoneStateListener
+import android.telephony.TelephonyManager
 import android.widget.*
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -61,6 +63,8 @@ class MainActivity : Activity() {
     private var activeRecordingFile: File? = null
     private var previousAudioMode: Int? = null
     private var previousSpeakerphoneOn: Boolean? = null
+    private var phoneStateListener: PhoneStateListener? = null
+    private var lastCallState: Int = TelephonyManager.CALL_STATE_IDLE
 
     private lateinit var serverUrl: EditText
     private lateinit var customerNameInput: EditText
@@ -159,6 +163,7 @@ class MainActivity : Activity() {
         }
         requestAudioPermission()
         requestRecordPermission()
+        requestPhoneStatePermission()
         ensureRecordingFolder()
         renderRecentCallPanel()
         showMainPage()
@@ -354,9 +359,11 @@ class MainActivity : Activity() {
         callStartedAt = System.currentTimeMillis()
         autoUploadTried = false
         autoUploadRunning = false
+        lastCallState = TelephonyManager.CALL_STATE_IDLE
         renderRecentCallPanel()
         startExperimentalCallRecording(contact)
-        status.text = "Calling ${contact.name}. Experimental recorder started. Come back here after the call."
+        registerCallStateListener()
+        status.text = "Calling ${contact.name}. Recording started. Upload will run automatically after the call ends."
         val uri = Uri.parse("tel:+91${contact.phone.filter { it.isDigit() }.takeLast(10)}")
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
             startActivity(Intent(Intent.ACTION_CALL, uri))
@@ -370,13 +377,71 @@ class MainActivity : Activity() {
         super.onResume()
         val contact = pendingCallContact ?: return
         if (callStartedAt == 0L || System.currentTimeMillis() - callStartedAt < 2_000L) return
+        if (!autoUploadRunning) {
+            finishCallAndUpload(contact, "App returned after call. Uploading recording automatically...")
+        }
+    }
+
+    override fun onDestroy() {
+        unregisterCallStateListener()
+        super.onDestroy()
+    }
+
+    private fun registerCallStateListener() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_PHONE_STATE), 13)
+            return
+        }
+        val telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+        unregisterCallStateListener()
+        phoneStateListener = object : PhoneStateListener() {
+            override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                runOnUiThread { handleCallStateChanged(state) }
+            }
+        }
+        telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
+    }
+
+    private fun unregisterCallStateListener() {
+        val listener = phoneStateListener ?: return
+        try {
+            val telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            telephonyManager.listen(listener, PhoneStateListener.LISTEN_NONE)
+        } catch (_: Exception) {
+        } finally {
+            phoneStateListener = null
+        }
+    }
+
+    private fun handleCallStateChanged(state: Int) {
+        val contact = pendingCallContact ?: run {
+            lastCallState = state
+            return
+        }
+        when (state) {
+            TelephonyManager.CALL_STATE_OFFHOOK -> {
+                status.text = "Call connected for ${contact.name}. Recording is running..."
+            }
+            TelephonyManager.CALL_STATE_IDLE -> {
+                if (lastCallState == TelephonyManager.CALL_STATE_OFFHOOK && !autoUploadRunning) {
+                    finishCallAndUpload(contact, "Call ended. Uploading recording automatically...")
+                }
+            }
+        }
+        lastCallState = state
+    }
+
+    private fun finishCallAndUpload(contact: Contact, message: String) {
+        val startedAt = callStartedAt
         stopExperimentalCallRecording()
+        unregisterCallStateListener()
         readyToUploadContact = contact
-        readyToUploadStartedAt = callStartedAt
+        readyToUploadStartedAt = startedAt
         pendingCallContact = null
         selectedContact = contact
         renderRecentCallPanel()
-        status.text = "Call finished for ${contact.name}. Tap Find & Upload Call Recording."
+        status.text = message
+        uploadLatestRecording(contact, startedAt)
     }
 
     private fun startExperimentalCallRecording(contact: Contact) {
@@ -526,6 +591,12 @@ class MainActivity : Activity() {
     private fun requestRecordPermission() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 12)
+        }
+    }
+
+    private fun requestPhoneStatePermission() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_PHONE_STATE), 13)
         }
     }
 
