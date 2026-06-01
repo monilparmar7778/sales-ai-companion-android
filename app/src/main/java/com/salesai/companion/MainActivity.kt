@@ -2,8 +2,10 @@ package com.salesai.companion
 
 import android.Manifest
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
@@ -57,6 +59,8 @@ class MainActivity : Activity() {
     private var showingDashboard = false
     private var activeRecorder: MediaRecorder? = null
     private var activeRecordingFile: File? = null
+    private var previousAudioMode: Int? = null
+    private var previousSpeakerphoneOn: Boolean? = null
 
     private lateinit var serverUrl: EditText
     private lateinit var customerNameInput: EditText
@@ -387,6 +391,7 @@ class MainActivity : Activity() {
             val folder = recordingFolder()
             if (!folder.exists()) folder.mkdirs()
             val file = File(folder, contactRecordingFileName(contact, "m4a"))
+            enableSpeakerRecordingAssist()
             val recorder = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else MediaRecorder()
             recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
             recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
@@ -401,18 +406,48 @@ class MainActivity : Activity() {
         } catch (exc: Exception) {
             activeRecorder = null
             activeRecordingFile = null
+            restoreSpeakerRecordingAssist()
             status.text = "Experimental recording could not start: ${errorMessage(exc)}"
         }
     }
 
     private fun stopExperimentalCallRecording() {
-        val recorder = activeRecorder ?: return
+        val recorder = activeRecorder
+        if (recorder != null) {
+            try {
+                recorder.stop()
+            } catch (_: Exception) {
+            } finally {
+                recorder.release()
+                activeRecorder = null
+            }
+        }
+        restoreSpeakerRecordingAssist()
+    }
+
+    private fun enableSpeakerRecordingAssist() {
         try {
-            recorder.stop()
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            if (previousAudioMode == null) previousAudioMode = audioManager.mode
+            if (previousSpeakerphoneOn == null) previousSpeakerphoneOn = audioManager.isSpeakerphoneOn
+            audioManager.mode = AudioManager.MODE_IN_CALL
+            audioManager.isSpeakerphoneOn = true
+            Toast.makeText(this, "Speaker enabled for recording test.", Toast.LENGTH_SHORT).show()
+        } catch (_: Exception) {
+            previousAudioMode = null
+            previousSpeakerphoneOn = null
+        }
+    }
+
+    private fun restoreSpeakerRecordingAssist() {
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            previousSpeakerphoneOn?.let { audioManager.isSpeakerphoneOn = it }
+            previousAudioMode?.let { audioManager.mode = it }
         } catch (_: Exception) {
         } finally {
-            recorder.release()
-            activeRecorder = null
+            previousAudioMode = null
+            previousSpeakerphoneOn = null
         }
     }
 
