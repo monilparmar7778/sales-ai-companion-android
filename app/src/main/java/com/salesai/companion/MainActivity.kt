@@ -386,8 +386,7 @@ class MainActivity : Activity() {
             stopExperimentalCallRecording()
             val folder = recordingFolder()
             if (!folder.exists()) folder.mkdirs()
-            val name = contact.name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "customer" }
-            val file = File(folder, "${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}_${name}_call_test.m4a")
+            val file = File(folder, contactRecordingFileName(contact, "m4a"))
             val recorder = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else MediaRecorder()
             recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
             recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
@@ -621,7 +620,8 @@ class MainActivity : Activity() {
 
         scope.launch {
             try {
-                val fileName = displayName(uri)
+                val originalFileName = displayName(uri)
+                val fileName = contactRecordingFileName(contact, recordingExtension(originalFileName))
                 val bytes = withContext(Dispatchers.IO) {
                     if (uri.scheme == "file") {
                         File(uri.path.orEmpty()).readBytes()
@@ -857,8 +857,23 @@ class MainActivity : Activity() {
         val folder = recordingFolder()
         if (!folder.exists()) folder.mkdirs()
         val safeName = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "call-recording.m4a" }
-        val stampedName = "${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}_$safeName"
-        File(folder, stampedName).writeBytes(bytes)
+        File(folder, safeName).writeBytes(bytes)
+    }
+
+    private fun contactRecordingFileName(contact: Contact, extension: String): String {
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val safeName = safeRecordingPart(contact.name).ifBlank { "customer" }
+        val safePhone = contact.phone.filter { it.isDigit() }.takeLast(10).ifBlank { "no_phone" }
+        val safeExtension = extension.lowercase(Locale.US).replace(Regex("[^a-z0-9]"), "").ifBlank { "m4a" }
+        return "${timestamp}_${safeName}_${safePhone}_call.$safeExtension"
+    }
+
+    private fun safeRecordingPart(value: String): String {
+        return value.trim().replace(Regex("[^A-Za-z0-9]+"), "_").trim('_')
+    }
+
+    private fun recordingExtension(fileName: String): String {
+        return fileName.substringAfterLast('.', "m4a")
     }
 
     private fun formatAudioDate(seconds: Long): String {
