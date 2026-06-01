@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -54,6 +55,8 @@ class MainActivity : Activity() {
     private var autoUploadTried = false
     private var autoUploadRunning = false
     private var showingDashboard = false
+    private var activeRecorder: MediaRecorder? = null
+    private var activeRecordingFile: File? = null
 
     private lateinit var serverUrl: EditText
     private lateinit var customerNameInput: EditText
@@ -151,6 +154,7 @@ class MainActivity : Activity() {
             refreshDashboard()
         }
         requestAudioPermission()
+        requestRecordPermission()
         ensureRecordingFolder()
         renderRecentCallPanel()
         showMainPage()
@@ -347,7 +351,8 @@ class MainActivity : Activity() {
         autoUploadTried = false
         autoUploadRunning = false
         renderRecentCallPanel()
-        status.text = "Calling ${contact.name}. Come back here after the call to upload recording."
+        startExperimentalCallRecording(contact)
+        status.text = "Calling ${contact.name}. Experimental recorder started. Come back here after the call."
         val uri = Uri.parse("tel:+91${contact.phone.filter { it.isDigit() }.takeLast(10)}")
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
             startActivity(Intent(Intent.ACTION_CALL, uri))
@@ -361,12 +366,55 @@ class MainActivity : Activity() {
         super.onResume()
         val contact = pendingCallContact ?: return
         if (callStartedAt == 0L || System.currentTimeMillis() - callStartedAt < 2_000L) return
+        stopExperimentalCallRecording()
         readyToUploadContact = contact
         readyToUploadStartedAt = callStartedAt
         pendingCallContact = null
         selectedContact = contact
         renderRecentCallPanel()
         status.text = "Call finished for ${contact.name}. Tap Find & Upload Call Recording."
+    }
+
+    private fun startExperimentalCallRecording(contact: Contact) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 12)
+            status.text = "Microphone permission required for test recording."
+            return
+        }
+
+        try {
+            stopExperimentalCallRecording()
+            val folder = recordingFolder()
+            if (!folder.exists()) folder.mkdirs()
+            val name = contact.name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "customer" }
+            val file = File(folder, "${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}_${name}_call_test.m4a")
+            val recorder = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else MediaRecorder()
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            recorder.setAudioEncodingBitRate(128000)
+            recorder.setAudioSamplingRate(44100)
+            recorder.setOutputFile(file.absolutePath)
+            recorder.prepare()
+            recorder.start()
+            activeRecorder = recorder
+            activeRecordingFile = file
+        } catch (exc: Exception) {
+            activeRecorder = null
+            activeRecordingFile = null
+            status.text = "Experimental recording could not start: ${errorMessage(exc)}"
+        }
+    }
+
+    private fun stopExperimentalCallRecording() {
+        val recorder = activeRecorder ?: return
+        try {
+            recorder.stop()
+        } catch (_: Exception) {
+        } finally {
+            recorder.release()
+            activeRecorder = null
+        }
     }
 
     private fun renderRecentCallPanel() {
@@ -441,6 +489,12 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun requestRecordPermission() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 12)
+        }
+    }
+
     private fun hasAudioPermission(): Boolean {
         val permission = if (Build.VERSION.SDK_INT >= 33) {
             Manifest.permission.READ_MEDIA_AUDIO
@@ -476,7 +530,9 @@ class MainActivity : Activity() {
         scope.launch {
             try {
                 val latest = withContext(Dispatchers.IO) {
-                    findLatestAppFolderRecording(startedAtMs) ?: findLatestAudioRecording(startedAtMs)
+                    activeRecordingFile?.takeIf { it.exists() }?.let { Uri.fromFile(it) }
+                        ?: findLatestAppFolderRecording(startedAtMs)
+                        ?: findLatestAudioRecording(startedAtMs)
                 }
                 if (latest == null) {
                     status.text = "No recording auto-found. Scanning visible phone audio..."
@@ -567,7 +623,11 @@ class MainActivity : Activity() {
             try {
                 val fileName = displayName(uri)
                 val bytes = withContext(Dispatchers.IO) {
-                    contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    if (uri.scheme == "file") {
+                        File(uri.path.orEmpty()).readBytes()
+                    } else {
+                        contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    }
                 } ?: throw IOException("Could not read recording")
                 withContext(Dispatchers.IO) { copyRecordingToAppFolder(fileName, bytes) }
 
@@ -604,6 +664,7 @@ class MainActivity : Activity() {
                 if (readyToUploadContact?.id == contact.id) {
                     readyToUploadContact = null
                     readyToUploadStartedAt = 0L
+                    activeRecordingFile = null
                     renderRecentCallPanel()
                 }
                 refreshDashboard(showLoading = false)
@@ -806,6 +867,9 @@ class MainActivity : Activity() {
     }
 
     private fun displayName(uri: Uri): String {
+        if (uri.scheme == "file") {
+            return File(uri.path.orEmpty()).name.ifBlank { "call-recording.m4a" }
+        }
         contentResolver.query(uri, null, null, null, null)?.use { cursor ->
             val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
             if (index >= 0 && cursor.moveToFirst()) {
