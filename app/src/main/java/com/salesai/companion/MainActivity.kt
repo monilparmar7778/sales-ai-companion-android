@@ -829,6 +829,7 @@ class MainActivity : Activity() {
                         contentResolver.openInputStream(uri)?.use { it.readBytes() }
                     }
                 } ?: throw IOException("Could not read recording")
+                validateRecordingBytes(bytes)
                 withContext(Dispatchers.IO) { copyRecordingToAppFolder(fileName, bytes) }
 
                 val requestBody = MultipartBody.Builder()
@@ -1118,6 +1119,12 @@ class MainActivity : Activity() {
         if (!folder.exists()) folder.mkdirs()
         val safeName = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "call-recording.m4a" }
         File(folder, safeName).writeBytes(bytes)
+    }
+
+    private fun validateRecordingBytes(bytes: ByteArray) {
+        if (bytes.size < 12_000) {
+            throw IOException("Recording has no usable audio. Your phone blocked call recording audio, or the call was too short. Put the call on speaker and talk for 20 seconds, then try again.")
+        }
     }
 
     private fun contactRecordingFileName(contact: Contact, extension: String): String {
