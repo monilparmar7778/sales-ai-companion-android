@@ -18,6 +18,7 @@ import android.os.Environment
 import android.provider.CallLog
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.telecom.TelecomManager
 import android.widget.*
 import androidx.core.app.ActivityCompat
@@ -108,6 +109,8 @@ class MainActivity : Activity() {
         val customerPageButton = primaryButton("Upload Calls")
         val dashboardPageButton = secondaryButton("Dashboard")
         val defaultDialerButton = secondaryButton("Set as Phone App")
+        val defaultAppsButton = secondaryButton("Open Default Phone Settings")
+        val diagnosticButton = secondaryButton("Run Recording Diagnostic")
         status = TextView(this).apply {
             text = "Ready"
             textSize = 14f
@@ -176,6 +179,8 @@ class MainActivity : Activity() {
         dashboardPage.addView(sectionTitle("Recording Setup"))
         dashboardPage.addView(defaultDialerInfo)
         dashboardPage.addView(defaultDialerButton)
+        dashboardPage.addView(defaultAppsButton)
+        dashboardPage.addView(diagnosticButton)
         dashboardPage.addView(folderInfo)
 
         root.addView(mainPage)
@@ -192,6 +197,8 @@ class MainActivity : Activity() {
             refreshDashboard()
         }
         defaultDialerButton.setOnClickListener { requestDefaultPhoneApp() }
+        defaultAppsButton.setOnClickListener { openDefaultPhoneSettings() }
+        diagnosticButton.setOnClickListener { runRecordingDiagnostic() }
         requestStartupPermissions()
         ensureRecordingFolder()
         updateDefaultDialerInfo()
@@ -524,6 +531,12 @@ class MainActivity : Activity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.CALL_PHONE)
         }
+        if (Build.VERSION.SDK_INT >= 26 && ContextCompat.checkSelfPermission(this, Manifest.permission.ANSWER_PHONE_CALLS) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.ANSWER_PHONE_CALLS)
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.READ_PHONE_STATE)
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.RECORD_AUDIO)
         }
@@ -731,6 +744,75 @@ class MainActivity : Activity() {
             status.text = "Approve Sales AI as the phone app to enable automatic call recording."
         } catch (exc: Exception) {
             status.text = "Phone app setup failed: ${errorMessage(exc)}"
+        }
+    }
+
+    private fun openDefaultPhoneSettings() {
+        val intents = listOf(
+            Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS),
+            Intent(Settings.ACTION_APPLICATION_SETTINGS),
+            Intent(Settings.ACTION_SETTINGS)
+        )
+        for (intent in intents) {
+            try {
+                startActivity(intent)
+                status.text = "Open Default apps, then set Phone app to Sales AI Companion."
+                return
+            } catch (_: Exception) {
+            }
+        }
+        status.text = "Could not open Android settings."
+    }
+
+    private fun runRecordingDiagnostic() {
+        requestRecordPermission()
+        requestCallLogPermission()
+        requestAudioPermission()
+        scope.launch {
+            val report = withContext(Dispatchers.IO) {
+                val folder = recordingFolder()
+                if (!folder.exists()) folder.mkdirs()
+                val latest = folder.listFiles()
+                    ?.filter { it.isFile && isAudioFileName(it.name) }
+                    ?.maxByOrNull { it.lastModified() }
+                val roleLine = if (Build.VERSION.SDK_INT >= 29) {
+                    val roleManager = getSystemService(RoleManager::class.java)
+                    "Dialer role available: ${roleManager?.isRoleAvailable(RoleManager.ROLE_DIALER) == true}"
+                } else {
+                    "Legacy dialer role check"
+                }
+                val testFile = File(folder, "diagnostic_${System.currentTimeMillis()}.m4a")
+                val testResult = runCatching {
+                    val recorder = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this@MainActivity) else MediaRecorder()
+                    recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+                    recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                    recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                    recorder.setOutputFile(testFile.absolutePath)
+                    recorder.prepare()
+                    recorder.start()
+                    Thread.sleep(1800L)
+                    recorder.stop()
+                    recorder.release()
+                    "Mic test file: ${testFile.length()} bytes"
+                }.getOrElse { exc ->
+                    testFile.delete()
+                    "Mic test failed: ${errorMessage(Exception(exc.message, exc))}"
+                }
+
+                listOf(
+                    "Default phone app: ${isDefaultPhoneApp()}",
+                    roleLine,
+                    "Mic permission: ${ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED}",
+                    "Call log permission: ${ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED}",
+                    "Folder: ${folder.absolutePath}",
+                    "Latest recording: ${latest?.name ?: "none"}",
+                    "Latest size: ${latest?.length() ?: 0} bytes",
+                    testResult
+                ).joinToString("\n")
+            }
+            folderInfo.text = report
+            status.text = "Diagnostic complete. Send screenshot of Recording Setup."
+            updateDefaultDialerInfo()
         }
     }
 
