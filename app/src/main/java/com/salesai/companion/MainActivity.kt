@@ -291,7 +291,7 @@ class MainActivity : Activity() {
     private fun ensureRecordingFolder() {
         val folder = recordingFolder()
         if (!folder.exists()) folder.mkdirs()
-        folderInfo.text = "Folder created:\n${folder.absolutePath}\n\nDirect phone-call recording cannot be forced by this app. For automatic upload, your phone recorder must save audio in a visible folder. If your recorder can change save location, choose this folder. Otherwise use Select Recording File after the call."
+        folderInfo.text = "Folder created:\n${folder.absolutePath}\n\nThis build uses a foreground recorder so the audio file can keep saving while the Phone app is open. Android may still block the other side of a normal SIM call on some phones."
     }
 
     private fun showMainPage() {
@@ -399,27 +399,31 @@ class MainActivity : Activity() {
             val folder = recordingFolder()
             if (!folder.exists()) folder.mkdirs()
             val file = File(folder, contactRecordingFileName(contact, "m4a"))
-            enableSpeakerRecordingAssist()
-            val recorder = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else MediaRecorder()
-            recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
-            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            recorder.setAudioEncodingBitRate(128000)
-            recorder.setAudioSamplingRate(44100)
-            recorder.setOutputFile(file.absolutePath)
-            recorder.prepare()
-            recorder.start()
-            activeRecorder = recorder
+            val intent = Intent(this, CallRecordingService::class.java).apply {
+                action = CallRecordingService.ACTION_START
+                putExtra(CallRecordingService.EXTRA_FILE_PATH, file.absolutePath)
+            }
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            activeRecorder = null
             activeRecordingFile = file
         } catch (exc: Exception) {
             activeRecorder = null
             activeRecordingFile = null
-            restoreSpeakerRecordingAssist()
             status.text = "Experimental recording could not start: ${errorMessage(exc)}"
         }
     }
 
     private fun stopExperimentalCallRecording() {
+        try {
+            stopService(Intent(this, CallRecordingService::class.java).apply {
+                action = CallRecordingService.ACTION_STOP
+            })
+        } catch (_: Exception) {
+        }
         val recorder = activeRecorder
         if (recorder != null) {
             try {
@@ -430,7 +434,6 @@ class MainActivity : Activity() {
                 activeRecorder = null
             }
         }
-        restoreSpeakerRecordingAssist()
     }
 
     private fun enableSpeakerRecordingAssist() {
