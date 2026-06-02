@@ -19,7 +19,10 @@ class CallRecordingService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> startRecording(intent.getStringExtra(EXTRA_FILE_PATH).orEmpty())
+            ACTION_START -> startRecording(
+                intent.getStringExtra(EXTRA_FILE_PATH).orEmpty(),
+                intent.getIntExtra(EXTRA_AUDIO_SOURCE, MediaRecorder.AudioSource.MIC)
+            )
             ACTION_STOP -> {
                 stopRecording()
                 stopSelf()
@@ -35,7 +38,7 @@ class CallRecordingService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun startRecording(filePath: String) {
+    private fun startRecording(filePath: String, audioSource: Int) {
         if (filePath.isBlank()) {
             stopSelf()
             return
@@ -43,10 +46,12 @@ class CallRecordingService : Service() {
         try {
             stopRecording()
             File(filePath).parentFile?.mkdirs()
-            enableSpeakerAssist()
+            if (audioSource == MediaRecorder.AudioSource.MIC) {
+                enableSpeakerAssist()
+            }
             startForeground(NOTIFICATION_ID, recordingNotification())
             val mediaRecorder = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else MediaRecorder()
-            mediaRecorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            mediaRecorder.setAudioSource(audioSource)
             mediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             mediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             mediaRecorder.setAudioEncodingBitRate(128000)
@@ -118,6 +123,7 @@ class CallRecordingService : Service() {
         const val ACTION_START = "com.salesai.companion.action.START_CALL_RECORDING"
         const val ACTION_STOP = "com.salesai.companion.action.STOP_CALL_RECORDING"
         const val EXTRA_FILE_PATH = "file_path"
+        const val EXTRA_AUDIO_SOURCE = "audio_source"
         private const val NOTIFICATION_ID = 42
     }
 }

@@ -2,6 +2,7 @@ package com.salesai.companion
 
 import android.Manifest
 import android.app.Activity
+import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -17,6 +18,7 @@ import android.os.Environment
 import android.provider.CallLog
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.telecom.TelecomManager
 import android.widget.*
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -73,6 +75,7 @@ class MainActivity : Activity() {
     private lateinit var customerNotesInput: EditText
     private lateinit var status: TextView
     private lateinit var folderInfo: TextView
+    private lateinit var defaultDialerInfo: TextView
     private lateinit var mainPage: LinearLayout
     private lateinit var dashboardPage: LinearLayout
     private lateinit var recentCallPanel: LinearLayout
@@ -104,6 +107,7 @@ class MainActivity : Activity() {
         val dashboardButton = secondaryButton("Refresh Dashboard")
         val customerPageButton = primaryButton("Upload Calls")
         val dashboardPageButton = secondaryButton("Dashboard")
+        val defaultDialerButton = secondaryButton("Set as Phone App")
         status = TextView(this).apply {
             text = "Ready"
             textSize = 14f
@@ -111,6 +115,7 @@ class MainActivity : Activity() {
             setPadding(0, 10, 0, 10)
         }
         folderInfo = TextView(this)
+        defaultDialerInfo = TextView(this)
         mainPage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 10, 0, 0) }
         dashboardPage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 10, 0, 0) }
         recentCallPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -169,6 +174,8 @@ class MainActivity : Activity() {
         dashboardPage.addView(sectionTitle("Dashboard"))
         dashboardPage.addView(dashboardList)
         dashboardPage.addView(sectionTitle("Recording Setup"))
+        dashboardPage.addView(defaultDialerInfo)
+        dashboardPage.addView(defaultDialerButton)
         dashboardPage.addView(folderInfo)
 
         root.addView(mainPage)
@@ -184,8 +191,10 @@ class MainActivity : Activity() {
             showDashboardPage()
             refreshDashboard()
         }
+        defaultDialerButton.setOnClickListener { requestDefaultPhoneApp() }
         requestStartupPermissions()
         ensureRecordingFolder()
+        updateDefaultDialerInfo()
         renderRecentCallPanel()
         showMainPage()
     }
@@ -379,7 +388,7 @@ class MainActivity : Activity() {
     private fun ensureRecordingFolder() {
         val folder = recordingFolder()
         if (!folder.exists()) folder.mkdirs()
-        folderInfo.text = "Folder created:\n${folder.absolutePath}\n\nThis build uses a foreground recorder so the audio file can keep saving while the Phone app is open. Android may still block the other side of a normal SIM call on some phones."
+        folderInfo.text = "Folder created:\n${folder.absolutePath}\n\nThis build can use Sales AI as the phone app to detect active calls and start the free foreground recorder. Android/device policy may still block the other side of a normal SIM call, so blank recordings are rejected before upload."
     }
 
     private fun showMainPage() {
@@ -392,6 +401,7 @@ class MainActivity : Activity() {
         showingDashboard = true
         mainPage.visibility = android.view.View.GONE
         dashboardPage.visibility = android.view.View.VISIBLE
+        updateDefaultDialerInfo()
     }
 
     private fun renderContacts() {
@@ -459,6 +469,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        updateDefaultDialerInfo()
         val contact = pendingCallContact ?: return
         if (callStartedAt == 0L || System.currentTimeMillis() - callStartedAt < 2_000L) return
         if (!autoUploadRunning) {
@@ -671,6 +682,58 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun updateDefaultDialerInfo() {
+        if (!::defaultDialerInfo.isInitialized) return
+        defaultDialerInfo.text = if (isDefaultPhoneApp()) {
+            "Phone app setup: Active. Sales AI can detect connected calls and start recording automatically."
+        } else {
+            "Phone app setup: Not active. Tap Set as Phone App once to enable automatic call detection."
+        }
+    }
+
+    private fun isDefaultPhoneApp(): Boolean {
+        return if (Build.VERSION.SDK_INT >= 29) {
+            val roleManager = getSystemService(RoleManager::class.java)
+            roleManager?.isRoleHeld(RoleManager.ROLE_DIALER) == true
+        } else {
+            val telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+            telecomManager.defaultDialerPackage == packageName
+        }
+    }
+
+    private fun requestDefaultPhoneApp() {
+        if (isDefaultPhoneApp()) {
+            status.text = "Sales AI is already set as the phone app."
+            updateDefaultDialerInfo()
+            return
+        }
+
+        try {
+            val intent = if (Build.VERSION.SDK_INT >= 29) {
+                val roleManager = getSystemService(RoleManager::class.java)
+                if (roleManager?.isRoleAvailable(RoleManager.ROLE_DIALER) == true) {
+                    roleManager.createRequestRoleIntent(RoleManager.ROLE_DIALER)
+                } else {
+                    null
+                }
+            } else {
+                Intent(TelecomManager.ACTION_CHANGE_DEFAULT_DIALER).putExtra(
+                    TelecomManager.EXTRA_CHANGE_DEFAULT_DIALER_PACKAGE_NAME,
+                    packageName
+                )
+            }
+
+            if (intent == null) {
+                status.text = "This Android version does not expose the phone app setup role."
+                return
+            }
+            startActivityForResult(intent, REQUEST_DEFAULT_PHONE_APP)
+            status.text = "Approve Sales AI as the phone app to enable automatic call recording."
+        } catch (exc: Exception) {
+            status.text = "Phone app setup failed: ${errorMessage(exc)}"
+        }
+    }
+
     private fun requestAudioPermission() {
         val permission = if (Build.VERSION.SDK_INT >= 33) {
             Manifest.permission.READ_MEDIA_AUDIO
@@ -713,6 +776,15 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_DEFAULT_PHONE_APP) {
+            updateDefaultDialerInfo()
+            status.text = if (isDefaultPhoneApp()) {
+                "Phone app setup active. Automatic recording will start on connected calls."
+            } else {
+                "Phone app setup not enabled."
+            }
+            return
+        }
         if (requestCode == 20 && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
             uploadRecording(uri)
@@ -1164,5 +1236,9 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         scope.cancel()
+    }
+
+    companion object {
+        private const val REQUEST_DEFAULT_PHONE_APP = 21
     }
 }
