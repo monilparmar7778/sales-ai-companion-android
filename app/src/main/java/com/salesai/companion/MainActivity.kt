@@ -184,9 +184,7 @@ class MainActivity : Activity() {
             showDashboardPage()
             refreshDashboard()
         }
-        requestAudioPermission()
-        requestRecordPermission()
-        requestCallLogPermission()
+        requestStartupPermissions()
         ensureRecordingFolder()
         renderRecentCallPanel()
         showMainPage()
@@ -469,27 +467,72 @@ class MainActivity : Activity() {
     }
 
     private fun finishCallAndUpload(contact: Contact, message: String) {
+        if (autoUploadRunning) return
+        autoUploadRunning = true
         val startedAt = callStartedAt
         stopExperimentalCallRecording()
-        val callDuration = latestOutgoingCallDurationSeconds(contact, startedAt)
-        if (callDuration == 0L) {
+        status.text = "Checking whether call was answered..."
+        scope.launch {
+            delay(3_000L)
+            val callDuration = withContext(Dispatchers.IO) {
+                latestOutgoingCallDurationSeconds(contact, startedAt)
+            }
+            if (callDuration == null) {
+                skipCallUpload(contact, "Could not verify answered call. Allow Call Log permission; upload skipped.")
+                return@launch
+            }
+            if (callDuration <= 0L) {
+                skipCallUpload(contact, "Call was not answered. Recording deleted and upload skipped.")
+                return@launch
+            }
+            readyToUploadContact = contact
+            readyToUploadStartedAt = startedAt
             pendingCallContact = null
             selectedContact = contact
-            readyToUploadContact = null
-            readyToUploadStartedAt = 0L
-            activeRecordingFile?.delete()
-            activeRecordingFile = null
             renderRecentCallPanel()
-            status.text = "Call was not answered. Recording deleted and upload skipped."
-            return
+            status.text = message
+            autoUploadRunning = false
+            uploadLatestRecording(contact, startedAt)
         }
-        readyToUploadContact = contact
-        readyToUploadStartedAt = startedAt
+    }
+
+    private fun skipCallUpload(contact: Contact, message: String) {
         pendingCallContact = null
         selectedContact = contact
+        readyToUploadContact = null
+        readyToUploadStartedAt = 0L
+        activeRecordingFile?.delete()
+        activeRecordingFile = null
+        autoUploadRunning = false
         renderRecentCallPanel()
         status.text = message
-        uploadLatestRecording(contact, startedAt)
+    }
+
+    private fun requestStartupPermissions() {
+        val permissions = mutableListOf<String>()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.CALL_PHONE)
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CALL_LOG) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.READ_CALL_LOG)
+        }
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        val audioPermission = if (Build.VERSION.SDK_INT >= 33) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        if (ContextCompat.checkSelfPermission(this, audioPermission) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(audioPermission)
+        }
+        if (permissions.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, permissions.toTypedArray(), 30)
+        }
     }
 
     private fun startExperimentalCallRecording(contact: Contact) {
