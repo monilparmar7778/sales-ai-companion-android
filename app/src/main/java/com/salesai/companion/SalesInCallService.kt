@@ -55,7 +55,7 @@ class SalesInCallService : InCallService() {
         val intent = Intent(this, CallRecordingService::class.java).apply {
             action = CallRecordingService.ACTION_START
             putExtra(CallRecordingService.EXTRA_FILE_PATH, file.absolutePath)
-            putExtra(CallRecordingService.EXTRA_AUDIO_SOURCE, MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+            putExtra(CallRecordingService.EXTRA_AUDIO_SOURCE, MediaRecorder.AudioSource.VOICE_CALL)
         }
         if (Build.VERSION.SDK_INT >= 26) {
             startForegroundService(intent)

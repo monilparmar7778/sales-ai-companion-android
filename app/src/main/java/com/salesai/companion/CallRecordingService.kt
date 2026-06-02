@@ -46,18 +46,11 @@ class CallRecordingService : Service() {
         try {
             stopRecording()
             File(filePath).parentFile?.mkdirs()
-            if (audioSource == MediaRecorder.AudioSource.MIC) {
+            if (audioSource == MediaRecorder.AudioSource.MIC || audioSource == MediaRecorder.AudioSource.VOICE_CALL) {
                 enableSpeakerAssist()
             }
             startForeground(NOTIFICATION_ID, recordingNotification())
-            val mediaRecorder = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else MediaRecorder()
-            mediaRecorder.setAudioSource(audioSource)
-            mediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            mediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            mediaRecorder.setAudioEncodingBitRate(128000)
-            mediaRecorder.setAudioSamplingRate(44100)
-            mediaRecorder.setOutputFile(filePath)
-            mediaRecorder.prepare()
+            val mediaRecorder = createPreparedRecorder(filePath, audioSource)
             mediaRecorder.start()
             recorder = mediaRecorder
         } catch (_: Exception) {
@@ -65,6 +58,34 @@ class CallRecordingService : Service() {
             restoreSpeakerAssist()
             stopSelf()
         }
+    }
+
+    private fun createPreparedRecorder(filePath: String, preferredAudioSource: Int): MediaRecorder {
+        val audioSources = listOf(
+            preferredAudioSource,
+            MediaRecorder.AudioSource.VOICE_CALL,
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            MediaRecorder.AudioSource.MIC
+        ).distinct()
+
+        var lastError: Exception? = null
+        for (source in audioSources) {
+            val mediaRecorder = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else MediaRecorder()
+            try {
+                mediaRecorder.setAudioSource(source)
+                mediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                mediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                mediaRecorder.setAudioEncodingBitRate(128000)
+                mediaRecorder.setAudioSamplingRate(44100)
+                mediaRecorder.setOutputFile(filePath)
+                mediaRecorder.prepare()
+                return mediaRecorder
+            } catch (exc: Exception) {
+                lastError = exc
+                mediaRecorder.release()
+            }
+        }
+        throw lastError ?: IllegalStateException("No call audio source is available")
     }
 
     private fun stopRecording() {
