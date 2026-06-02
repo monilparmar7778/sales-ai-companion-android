@@ -5,12 +5,16 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.CallLog
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.widget.*
@@ -27,6 +31,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 data class Contact(val id: String, val name: String, val phone: String)
 data class AudioCandidate(val uri: Uri, val name: String, val addedSeconds: Long, val modifiedSeconds: Long)
@@ -94,15 +99,20 @@ class MainActivity : Activity() {
             inputType = android.text.InputType.TYPE_CLASS_PHONE
         }
         customerNotesInput = EditText(this).apply { hint = "Notes" }
-        val saveCustomerButton = Button(this).apply { text = "Save Customer" }
-        val syncButton = Button(this).apply { text = "Sync Customers" }
-        val dashboardButton = Button(this).apply { text = "Refresh Dashboard" }
-        val customerPageButton = Button(this).apply { text = "Customers" }
-        val dashboardPageButton = Button(this).apply { text = "Dashboard" }
-        status = TextView(this).apply { text = "Ready" }
+        val saveCustomerButton = primaryButton("Save Customer")
+        val syncButton = secondaryButton("Sync Customers")
+        val dashboardButton = secondaryButton("Refresh Dashboard")
+        val customerPageButton = primaryButton("Upload Calls")
+        val dashboardPageButton = secondaryButton("Dashboard")
+        status = TextView(this).apply {
+            text = "Ready"
+            textSize = 14f
+            setTextColor(Color.rgb(72, 80, 96))
+            setPadding(0, 10, 0, 10)
+        }
         folderInfo = TextView(this)
-        mainPage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        dashboardPage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        mainPage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 10, 0, 0) }
+        dashboardPage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 10, 0, 0) }
         recentCallPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         recentAudioList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         contactList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -120,26 +130,43 @@ class MainActivity : Activity() {
         }
 
         root.addView(TextView(this).apply {
-            text = "Sales AI Companion"
-            textSize = 24f
+            text = "AnyLaser"
+            textSize = 26f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.rgb(18, 24, 38))
+        })
+        root.addView(TextView(this).apply {
+            text = "Upload, analyze and manage sales call recordings"
+            textSize = 13f
+            setTextColor(Color.rgb(92, 100, 115))
+            setPadding(0, 2, 0, 10)
         })
         root.addView(serverUrl)
         root.addView(navRow)
         root.addView(buttonRow)
         root.addView(status)
 
-        mainPage.addView(sectionTitle("Add Customer"))
-        mainPage.addView(customerNameInput)
-        mainPage.addView(customerPhoneInput)
-        mainPage.addView(customerNotesInput)
-        mainPage.addView(saveCustomerButton)
-        mainPage.addView(sectionTitle("After Call"))
+        mainPage.addView(sectionTitle("Upload Calls"))
+        mainPage.addView(TextView(this).apply {
+            text = "Save customer, tap Call, return after call. Answered calls upload automatically."
+            textSize = 13f
+            setTextColor(Color.rgb(92, 100, 115))
+            setPadding(0, 0, 0, 10)
+        })
+        mainPage.addView(card().apply {
+            addView(sectionTitle("Add Customer"))
+            addView(customerNameInput)
+            addView(customerPhoneInput)
+            addView(customerNotesInput)
+            addView(saveCustomerButton)
+        })
+        mainPage.addView(sectionTitle("Call Queue"))
         mainPage.addView(recentCallPanel)
         mainPage.addView(recentAudioList)
         mainPage.addView(sectionTitle("Customers"))
         mainPage.addView(contactList)
 
-        dashboardPage.addView(sectionTitle("Call Analysis Dashboard"))
+        dashboardPage.addView(sectionTitle("Dashboard"))
         dashboardPage.addView(dashboardList)
         dashboardPage.addView(sectionTitle("Recording Setup"))
         dashboardPage.addView(folderInfo)
@@ -159,6 +186,7 @@ class MainActivity : Activity() {
         }
         requestAudioPermission()
         requestRecordPermission()
+        requestCallLogPermission()
         ensureRecordingFolder()
         renderRecentCallPanel()
         showMainPage()
@@ -280,8 +308,70 @@ class MainActivity : Activity() {
         return TextView(this).apply {
             text = title
             textSize = 20f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.rgb(18, 24, 38))
             setPadding(0, 28, 0, 10)
         }
+    }
+
+    private fun card(): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(22, 18, 22, 18)
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                setStroke(1, Color.rgb(224, 229, 238))
+                cornerRadius = 18f
+            }
+        }
+    }
+
+    private fun primaryButton(label: String): Button {
+        return Button(this).apply {
+            text = label
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                setColor(Color.rgb(76, 91, 255))
+                cornerRadius = 12f
+            }
+        }
+    }
+
+    private fun secondaryButton(label: String): Button {
+        return Button(this).apply {
+            text = label
+            setTextColor(Color.rgb(38, 45, 65))
+            background = GradientDrawable().apply {
+                setColor(Color.rgb(246, 248, 252))
+                setStroke(1, Color.rgb(224, 229, 238))
+                cornerRadius = 12f
+            }
+        }
+    }
+
+    private fun metricCard(title: String, value: String, subtitle: String): LinearLayout {
+        return card().apply {
+            addView(TextView(this@MainActivity).apply {
+                text = title
+                textSize = 12f
+                setTextColor(Color.rgb(92, 100, 115))
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = value
+                textSize = 24f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.rgb(18, 24, 38))
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = subtitle
+                textSize = 12f
+                setTextColor(Color.rgb(25, 150, 95))
+            })
+        }
+    }
+
+    private fun addSpace(parent: LinearLayout, height: Int = 12) {
+        parent.addView(Space(this), LinearLayout.LayoutParams(1, height))
     }
 
     private fun recordingFolder(): File {
@@ -314,36 +404,39 @@ class MainActivity : Activity() {
         }
 
         contacts.forEach { contact ->
-            val box = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(0, 24, 0, 24)
-            }
+            val box = card()
             box.addView(TextView(this).apply {
-                text = "${contact.name} - ${contact.phone}"
+                text = contact.name
                 textSize = 18f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.rgb(18, 24, 38))
             })
-            box.addView(Button(this).apply {
-                text = "Call ${contact.name}"
+            box.addView(TextView(this).apply {
+                text = contact.phone
+                textSize = 14f
+                setTextColor(Color.rgb(92, 100, 115))
+                setPadding(0, 2, 0, 8)
+            })
+            box.addView(primaryButton("Call ${contact.name}").apply {
                 setOnClickListener {
                     selectedContact = contact
                     callCustomer(contact)
                 }
             })
-            box.addView(Button(this).apply {
-                text = "Find & Upload Latest Recording"
+            box.addView(secondaryButton("Upload Latest Recording").apply {
                 setOnClickListener {
                     selectedContact = contact
                     uploadLatestRecording(contact, readyToUploadStartedAt.takeIf { it > 0L } ?: callStartedAt)
                 }
             })
-            box.addView(Button(this).apply {
-                text = "Upload Recording"
+            box.addView(secondaryButton("Select Recording File").apply {
                 setOnClickListener {
                     selectedContact = contact
                     pickRecording()
                 }
             })
             contactList.addView(box)
+            addSpace(contactList, 14)
         }
     }
 
@@ -378,6 +471,18 @@ class MainActivity : Activity() {
     private fun finishCallAndUpload(contact: Contact, message: String) {
         val startedAt = callStartedAt
         stopExperimentalCallRecording()
+        val callDuration = latestOutgoingCallDurationSeconds(contact, startedAt)
+        if (callDuration == 0L) {
+            pendingCallContact = null
+            selectedContact = contact
+            readyToUploadContact = null
+            readyToUploadStartedAt = 0L
+            activeRecordingFile?.delete()
+            activeRecordingFile = null
+            renderRecentCallPanel()
+            status.text = "Call was not answered. Recording deleted and upload skipped."
+            return
+        }
         readyToUploadContact = contact
         readyToUploadStartedAt = startedAt
         pendingCallContact = null
@@ -537,6 +642,12 @@ class MainActivity : Activity() {
     private fun requestRecordPermission() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 12)
+        }
+    }
+
+    private fun requestCallLogPermission() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CALL_LOG) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_CALL_LOG), 14)
         }
     }
 
@@ -778,11 +889,10 @@ class MainActivity : Activity() {
         val warmCount = calls.count { it.lead.equals("warm", ignoreCase = true) }
         val coldCount = calls.count { it.lead.equals("cold", ignoreCase = true) }
 
-        dashboardList.addView(TextView(this).apply {
-            text = "Total: ${calls.size} | Done: $doneCount | Failed: $failedCount\nHot: $hotCount | Warm: $warmCount | Cold: $coldCount"
-            textSize = 16f
-            setPadding(0, 0, 0, 18)
-        })
+        dashboardList.addView(metricCard("Total Calls", calls.size.toString(), "Done $doneCount | Failed $failedCount"))
+        addSpace(dashboardList, 12)
+        dashboardList.addView(metricCard("Lead Mix", "Hot $hotCount", "Warm $warmCount | Cold $coldCount"))
+        addSpace(dashboardList, 16)
 
         if (calls.isEmpty()) {
             dashboardList.addView(TextView(this).apply { text = "No call analysis yet." })
@@ -790,25 +900,86 @@ class MainActivity : Activity() {
         }
 
         calls.take(25).forEach { call ->
-            dashboardList.addView(TextView(this).apply {
-                text = buildString {
-                    append("${call.customerName} - ${call.phone}\n")
-                    append("Date: ${formatDate(call.createdAt)}\n")
-                    append("File: ${call.fileName}\n")
-                    append("Lead: ${call.lead} | Score: ${call.score} | Status: ${call.status}\n")
-                    if (call.summary.isNotBlank()) append("Summary: ${call.summary}\n")
-                    if (call.nextAction.isNotBlank()) append("Next: ${call.nextAction}\n")
-                    if (call.transcript.isNotBlank()) append("Transcript: ${call.transcript.take(350)}\n")
-                    if (call.error.isNotBlank()) append("Error: ${call.error}\n")
-                }
-                textSize = 15f
-                setPadding(0, 12, 0, 12)
+            dashboardList.addView(card().apply {
+                addView(TextView(this@MainActivity).apply {
+                    text = "${call.customerName} - ${call.phone}"
+                    textSize = 17f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(Color.rgb(18, 24, 38))
+                })
+                addView(TextView(this@MainActivity).apply {
+                    text = "${formatDate(call.createdAt)} | ${call.status}"
+                    textSize = 13f
+                    setTextColor(Color.rgb(92, 100, 115))
+                    setPadding(0, 2, 0, 8)
+                })
+                addView(TextView(this@MainActivity).apply {
+                    text = "Lead: ${call.lead} | Score: ${call.score}"
+                    textSize = 14f
+                    setTextColor(Color.rgb(76, 91, 255))
+                    setPadding(0, 0, 0, 6)
+                })
+                if (call.summary.isNotBlank()) addView(TextView(this@MainActivity).apply {
+                    text = "Summary: ${call.summary}"
+                    textSize = 14f
+                    setTextColor(Color.rgb(38, 45, 65))
+                })
+                if (call.nextAction.isNotBlank()) addView(TextView(this@MainActivity).apply {
+                    text = "Next: ${call.nextAction}"
+                    textSize = 14f
+                    setTextColor(Color.rgb(38, 45, 65))
+                })
+                if (call.transcript.isNotBlank()) addView(TextView(this@MainActivity).apply {
+                    text = "Transcript: ${call.transcript.take(220)}"
+                    textSize = 13f
+                    setTextColor(Color.rgb(92, 100, 115))
+                    setPadding(0, 6, 0, 0)
+                })
+                if (call.error.isNotBlank()) addView(TextView(this@MainActivity).apply {
+                    text = "Error: ${call.error}"
+                    textSize = 13f
+                    setTextColor(Color.rgb(220, 60, 70))
+                })
             })
+            addSpace(dashboardList, 14)
         }
     }
 
     private fun formatDate(value: String): String {
-        return value.take(19).replace("T", " ")
+        return try {
+            val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }
+            val parsed = parser.parse(value.take(19)) ?: return value.take(19).replace("T", " ")
+            SimpleDateFormat("yyyy-MM-dd hh:mm a", Locale.getDefault()).format(parsed)
+        } catch (_: Exception) {
+            value.take(19).replace("T", " ")
+        }
+    }
+
+    private fun latestOutgoingCallDurationSeconds(contact: Contact, startedAtMs: Long): Long? {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CALL_LOG) != PackageManager.PERMISSION_GRANTED) {
+            return null
+        }
+        val expectedPhone = contact.phone.filter { it.isDigit() }.takeLast(10)
+        val projection = arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.DATE, CallLog.Calls.DURATION, CallLog.Calls.TYPE)
+        return contentResolver.query(
+            CallLog.Calls.CONTENT_URI,
+            projection,
+            "${CallLog.Calls.TYPE} = ? AND ${CallLog.Calls.DATE} >= ?",
+            arrayOf(CallLog.Calls.OUTGOING_TYPE.toString(), (startedAtMs - 60_000L).toString()),
+            "${CallLog.Calls.DATE} DESC"
+        )?.use { cursor ->
+            val numberIndex = cursor.getColumnIndex(CallLog.Calls.NUMBER)
+            val durationIndex = cursor.getColumnIndex(CallLog.Calls.DURATION)
+            while (cursor.moveToNext()) {
+                val number = cursor.getString(numberIndex).orEmpty().filter { it.isDigit() }.takeLast(10)
+                if (expectedPhone.isBlank() || number == expectedPhone) {
+                    return@use cursor.getLong(durationIndex)
+                }
+            }
+            null
+        }
     }
 
     private fun findLatestAudioRecording(startedAtMs: Long): Uri? {
