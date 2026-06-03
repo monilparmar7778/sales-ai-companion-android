@@ -113,6 +113,7 @@ class MainActivity : Activity() {
         val diagnosticButton = secondaryButton("Run Recording Diagnostic")
         val allFilesButton = secondaryButton("Allow Recorder Import Access")
         val scanRecorderButton = secondaryButton("Scan Phone Recorder Files")
+        val findRecorderLocationButton = secondaryButton("Find Recorder Location")
         val micDiagnosticButton = secondaryButton("Record 10s Mic Test")
         status = TextView(this).apply {
             text = "Ready"
@@ -186,6 +187,7 @@ class MainActivity : Activity() {
         dashboardPage.addView(diagnosticButton)
         dashboardPage.addView(allFilesButton)
         dashboardPage.addView(scanRecorderButton)
+        dashboardPage.addView(findRecorderLocationButton)
         dashboardPage.addView(folderInfo)
         dashboardPage.addView(micDiagnosticButton)
 
@@ -207,6 +209,7 @@ class MainActivity : Activity() {
         diagnosticButton.setOnClickListener { runRecordingDiagnostic() }
         allFilesButton.setOnClickListener { requestRecorderImportAccess() }
         scanRecorderButton.setOnClickListener { scanRecorderImportsForSelectedContact() }
+        findRecorderLocationButton.setOnClickListener { findRecorderLocation() }
         micDiagnosticButton.setOnClickListener { runMicDiagnostic() }
         requestStartupPermissions()
         ensureRecordingFolder()
@@ -908,6 +911,37 @@ class MainActivity : Activity() {
         scanRecordingsForContact(contact, readyToUploadStartedAt.takeIf { it > 0L } ?: callStartedAt)
     }
 
+    private fun findRecorderLocation() {
+        requestAudioPermission()
+        if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
+            status.text = "Tap Allow Recorder Import Access first, then Find Recorder Location."
+            requestRecorderImportAccess()
+            return
+        }
+        recentAudioList.removeAllViews()
+        status.text = "Finding recorder locations..."
+
+        scope.launch {
+            try {
+                val scanFrom = System.currentTimeMillis() - 14L * 24L * 60L * 60L * 1000L
+                val candidates = withContext(Dispatchers.IO) {
+                    (recorderFolderCandidates(scanFrom) + recentAudioCandidates(scanFrom))
+                        .distinctBy { it.uri.toString() }
+                        .sortedByDescending { maxOf(it.modifiedSeconds, it.addedSeconds) }
+                        .take(25)
+                }
+                renderRecorderLocationResults(candidates)
+                status.text = if (candidates.isEmpty()) {
+                    "No audio found in recorder folders. Your phone may not be saving call recordings."
+                } else {
+                    "Found ${candidates.size} recent audio file(s). Check newest file date/time."
+                }
+            } catch (exc: Exception) {
+                status.text = "Recorder location scan failed: ${errorMessage(exc)}"
+            }
+        }
+    }
+
     private fun requestAudioPermission() {
         val permission = if (Build.VERSION.SDK_INT >= 33) {
             Manifest.permission.READ_MEDIA_AUDIO
@@ -1050,6 +1084,40 @@ class MainActivity : Activity() {
                 pickRecording()
             }
         })
+    }
+
+    private fun renderRecorderLocationResults(candidates: List<AudioCandidate>) {
+        recentAudioList.removeAllViews()
+        recentAudioList.addView(TextView(this).apply {
+            text = "Recorder Location Finder"
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 18, 0, 8)
+        })
+        if (candidates.isEmpty()) {
+            recentAudioList.addView(TextView(this).apply {
+                text = "No recent audio found in common recorder folders.\n\nMake one call with phone recorder/BCR enabled, then run this again."
+                setPadding(0, 0, 0, 8)
+            })
+            return
+        }
+        recentAudioList.addView(TextView(this).apply {
+            text = "Newest files are shown first. A real call recording should match your call time."
+            setPadding(0, 0, 0, 8)
+        })
+        candidates.forEach { candidate ->
+            val path = if (candidate.uri.scheme == "file") {
+                candidate.uri.path.orEmpty()
+            } else {
+                candidate.uri.toString()
+            }
+            recentAudioList.addView(TextView(this).apply {
+                text = "${candidate.name}\n${formatAudioDate(maxOf(candidate.modifiedSeconds, candidate.addedSeconds))}\n$path"
+                textSize = 13f
+                setTextColor(Color.rgb(72, 80, 96))
+                setPadding(0, 10, 0, 10)
+            })
+        }
     }
 
     private fun renderAudioScanHelp(message: String) {
