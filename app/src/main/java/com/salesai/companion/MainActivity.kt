@@ -740,7 +740,7 @@ class MainActivity : Activity() {
 
                 repeat(12) { attempt ->
                     status.text = "Auto-checking call recording for ${contact.name} (${attempt + 1}/12)..."
-                    val latest = withContext(Dispatchers.IO) { findLatestAudioRecording(startedAtMs) }
+                    val latest = withContext(Dispatchers.IO) { findBestPhoneRecorderCandidate(startedAtMs) }
                     if (latest != null) {
                         status.text = "Recording found. Uploading automatically..."
                         uploadRecordingForContact(contact, latest)
@@ -749,7 +749,7 @@ class MainActivity : Activity() {
                     delay(5_000L)
                 }
 
-                status.text = "Auto upload did not find a new recording. Use Upload Recording manually."
+                status.text = "Auto upload did not find a phone recorder file. Tap Find Recorder Location or Select Recording File."
             } catch (exc: Exception) {
                 status.text = "Auto upload failed: ${errorMessage(exc)}"
             } finally {
@@ -925,10 +925,7 @@ class MainActivity : Activity() {
             try {
                 val scanFrom = System.currentTimeMillis() - 14L * 24L * 60L * 60L * 1000L
                 val candidates = withContext(Dispatchers.IO) {
-                    (recorderFolderCandidates(scanFrom) + recentAudioCandidates(scanFrom))
-                        .distinctBy { it.uri.toString() }
-                        .sortedByDescending { maxOf(it.modifiedSeconds, it.addedSeconds) }
-                        .take(25)
+                    phoneRecorderCandidates(scanFrom).take(25)
                 }
                 renderRecorderLocationResults(candidates)
                 status.text = if (candidates.isEmpty()) {
@@ -1041,18 +1038,23 @@ class MainActivity : Activity() {
                 }
 
                 val candidates = withContext(Dispatchers.IO) {
-                    appFolderCandidates(startedAtMs) +
-                        recorderFolderCandidates(startedAtMs) +
-                        recentAudioCandidates(startedAtMs)
-                }.distinctBy { it.uri.toString() }
+                    phoneRecorderCandidates(startedAtMs)
+                }
                 if (candidates.isEmpty()) {
-                    renderAudioScanHelp("No recording was found in SalesAI, common recorder folders, or visible phone audio.")
+                    renderAudioScanHelp("No phone recorder file was found after this call.")
                     status.text = "No recorder file found. Use Select Recording File."
                     return@launch
                 }
 
+                val best = bestAutoUploadCandidate(candidates, startedAtMs)
+                if (best != null) {
+                    status.text = "Phone recorder file found. Uploading automatically..."
+                    uploadRecordingForContact(contact, best.uri)
+                    return@launch
+                }
+
                 renderAudioCandidates(contact, candidates)
-                status.text = "Found ${candidates.size} audio file(s). Choose the call recording to upload."
+                status.text = "Found ${candidates.size} possible audio file(s). Choose the one matching call time."
             } catch (exc: Exception) {
                 renderAudioScanHelp("Scan failed: ${errorMessage(exc)}")
                 status.text = "Scan failed: ${errorMessage(exc)}"
@@ -1359,6 +1361,41 @@ class MainActivity : Activity() {
         return recorderFolderCandidates(startedAtMs).firstOrNull()?.uri
     }
 
+    private fun findBestPhoneRecorderCandidate(startedAtMs: Long): Uri? {
+        val candidates = phoneRecorderCandidates(startedAtMs)
+        return bestAutoUploadCandidate(candidates, startedAtMs)?.uri
+    }
+
+    private fun phoneRecorderCandidates(startedAtMs: Long): List<AudioCandidate> {
+        return (
+            recorderFolderCandidates(startedAtMs) +
+                broadStorageAudioCandidates(startedAtMs) +
+                recentAudioCandidates(startedAtMs) +
+                appFolderCandidates(startedAtMs)
+            )
+            .distinctBy { it.uri.toString() }
+            .sortedByDescending { maxOf(it.modifiedSeconds, it.addedSeconds) }
+            .take(60)
+    }
+
+    private fun bestAutoUploadCandidate(candidates: List<AudioCandidate>, startedAtMs: Long): AudioCandidate? {
+        if (startedAtMs <= 0L) return candidates.firstOrNull()
+        val startedSeconds = startedAtMs / 1000
+        val strongMatches = candidates.filter {
+            maxOf(it.modifiedSeconds, it.addedSeconds) >= startedSeconds - 60
+        }
+        return when (strongMatches.size) {
+            0 -> null
+            1 -> strongMatches.first()
+            else -> strongMatches.firstOrNull { looksLikeCallRecording(it.name) }
+        }
+    }
+
+    private fun looksLikeCallRecording(name: String): Boolean {
+        val lower = name.lowercase(Locale.getDefault())
+        return listOf("call", "record", "rec", "bcr", "phone", "voice").any { lower.contains(it) }
+    }
+
     private fun appFolderCandidates(startedAtMs: Long): List<AudioCandidate> {
         val folder = recordingFolder()
         if (!folder.exists()) folder.mkdirs()
@@ -1402,6 +1439,28 @@ class MainActivity : Activity() {
             }
     }
 
+    private fun broadStorageAudioCandidates(startedAtMs: Long): List<AudioCandidate> {
+        if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
+            return emptyList()
+        }
+        val root = Environment.getExternalStorageDirectory()
+        val startMs = (startedAtMs.takeIf { it > 0L } ?: (System.currentTimeMillis() - 24 * 60 * 60 * 1000)) - 30 * 60 * 1000
+        val files = mutableListOf<File>()
+        collectAudioFiles(root, startMs, files, maxDepth = 5)
+        return files
+            .distinctBy { it.absolutePath }
+            .sortedByDescending { it.lastModified() }
+            .take(60)
+            .map {
+                AudioCandidate(
+                    uri = Uri.fromFile(it),
+                    name = "${it.name}\n${it.parentFile?.absolutePath.orEmpty()}",
+                    addedSeconds = it.lastModified() / 1000,
+                    modifiedSeconds = it.lastModified() / 1000
+                )
+            }
+    }
+
     private fun commonRecorderFolders(root: File): List<File> {
         return listOf(
             File(root, "Recordings"),
@@ -1419,6 +1478,24 @@ class MainActivity : Activity() {
             File(root, "MIUI/sound_recorder/call_rec"),
             File(root, "MIUI/sound_recorder/call_record"),
             File(root, "MIUI/recorder"),
+            File(root, "Sounds/CallRecord"),
+            File(root, "Sounds/Call Recordings"),
+            File(root, "Sounds/Recordings"),
+            File(root, "Audio/Call Recordings"),
+            File(root, "Voice Recorder"),
+            File(root, "VoiceRecord"),
+            File(root, "PhoneRecord"),
+            File(root, "PhoneRecordings"),
+            File(root, "Samsung/Voice Recorder"),
+            File(root, "Samsung/Call"),
+            File(root, "ColorOS/Recorder"),
+            File(root, "ColorOS/CallRecord"),
+            File(root, "ColorOS/Call Recordings"),
+            File(root, "Oppo/Recorder"),
+            File(root, "Vivo/Recorder"),
+            File(root, "vivo/Recorder"),
+            File(root, "OnePlus/Recorder"),
+            File(root, "Realme/Recorder"),
             File(root, "Music/Recordings"),
             File(root, "Download"),
             File(root, "Android/media/com.google.android.dialer"),
@@ -1450,7 +1527,13 @@ class MainActivity : Activity() {
 
     private fun shouldScanRecorderDir(dir: File): Boolean {
         val name = dir.name.lowercase(Locale.getDefault())
-        return name !in setOf("cache", "tmp", "thumbnails", ".thumbnails", "images", "pictures", "video")
+        if (name in setOf("cache", "tmp", "thumbnails", ".thumbnails", "images", "pictures", "video", "movies", "dcim")) {
+            return false
+        }
+        val path = dir.absolutePath.lowercase(Locale.getDefault())
+        return !listOf("/android/data/com.whatsapp", "/android/media/com.whatsapp", "/telegram", "/instagram").any {
+            path.contains(it)
+        }
     }
 
     private fun recentAudioCandidates(startedAtMs: Long): List<AudioCandidate> {
