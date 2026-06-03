@@ -113,6 +113,7 @@ class MainActivity : Activity() {
         val diagnosticButton = secondaryButton("Run Recording Diagnostic")
         val allFilesButton = secondaryButton("Allow Recorder Import Access")
         val scanRecorderButton = secondaryButton("Scan Phone Recorder Files")
+        val micDiagnosticButton = secondaryButton("Record 10s Mic Test")
         status = TextView(this).apply {
             text = "Ready"
             textSize = 14f
@@ -186,6 +187,7 @@ class MainActivity : Activity() {
         dashboardPage.addView(allFilesButton)
         dashboardPage.addView(scanRecorderButton)
         dashboardPage.addView(folderInfo)
+        dashboardPage.addView(micDiagnosticButton)
 
         root.addView(mainPage)
         root.addView(dashboardPage)
@@ -205,6 +207,7 @@ class MainActivity : Activity() {
         diagnosticButton.setOnClickListener { runRecordingDiagnostic() }
         allFilesButton.setOnClickListener { requestRecorderImportAccess() }
         scanRecorderButton.setOnClickListener { scanRecorderImportsForSelectedContact() }
+        micDiagnosticButton.setOnClickListener { runMicDiagnostic() }
         requestStartupPermissions()
         ensureRecordingFolder()
         updateDefaultDialerInfo()
@@ -610,6 +613,58 @@ class MainActivity : Activity() {
             } finally {
                 recorder.release()
                 activeRecorder = null
+            }
+        }
+    }
+
+    private fun runMicDiagnostic() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 12)
+            status.text = "Microphone permission required for mic test."
+            return
+        }
+
+        scope.launch {
+            var recorder: MediaRecorder? = null
+            val file = File(recordingFolder(), "mic_test_${System.currentTimeMillis()}.m4a")
+            try {
+                withContext(Dispatchers.IO) {
+                    file.parentFile?.mkdirs()
+                    recorder = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this@MainActivity) else MediaRecorder()
+                    recorder?.apply {
+                        setAudioSource(MediaRecorder.AudioSource.MIC)
+                        setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                        setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                        setAudioEncodingBitRate(128000)
+                        setAudioSamplingRate(44100)
+                        setOutputFile(file.absolutePath)
+                        prepare()
+                        start()
+                    }
+                }
+                status.text = "Mic test recording... speak now for 10 seconds."
+                delay(10_000L)
+                withContext(Dispatchers.IO) {
+                    try {
+                        recorder?.stop()
+                    } finally {
+                        recorder?.release()
+                        recorder = null
+                    }
+                }
+                val size = file.length()
+                status.text = if (size >= 12_000) {
+                    "Mic test OK: recorded ${size / 1024} KB. If call audio is blank, Android is blocking SIM call audio only."
+                } else {
+                    "Mic test failed: file is ${size / 1024} KB. Check microphone permission and Redmi security/battery restrictions."
+                }
+                ensureRecordingFolder()
+            } catch (exc: Exception) {
+                try {
+                    recorder?.release()
+                } catch (_: Exception) {
+                }
+                status.text = "Mic test failed: ${errorMessage(exc)}"
             }
         }
     }
