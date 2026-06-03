@@ -111,6 +111,8 @@ class MainActivity : Activity() {
         val defaultDialerButton = secondaryButton("Set as Phone App")
         val defaultAppsButton = secondaryButton("Open Default Phone Settings")
         val diagnosticButton = secondaryButton("Run Recording Diagnostic")
+        val allFilesButton = secondaryButton("Allow Recorder Import Access")
+        val scanRecorderButton = secondaryButton("Scan Phone Recorder Files")
         status = TextView(this).apply {
             text = "Ready"
             textSize = 14f
@@ -181,6 +183,8 @@ class MainActivity : Activity() {
         dashboardPage.addView(defaultDialerButton)
         dashboardPage.addView(defaultAppsButton)
         dashboardPage.addView(diagnosticButton)
+        dashboardPage.addView(allFilesButton)
+        dashboardPage.addView(scanRecorderButton)
         dashboardPage.addView(folderInfo)
 
         root.addView(mainPage)
@@ -199,6 +203,8 @@ class MainActivity : Activity() {
         defaultDialerButton.setOnClickListener { requestDefaultPhoneApp() }
         defaultAppsButton.setOnClickListener { openDefaultPhoneSettings() }
         diagnosticButton.setOnClickListener { runRecordingDiagnostic() }
+        allFilesButton.setOnClickListener { requestRecorderImportAccess() }
+        scanRecorderButton.setOnClickListener { scanRecorderImportsForSelectedContact() }
         requestStartupPermissions()
         ensureRecordingFolder()
         updateDefaultDialerInfo()
@@ -804,6 +810,7 @@ class MainActivity : Activity() {
                     roleLine,
                     "Mic permission: ${ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED}",
                     "Call log permission: ${ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED}",
+                    "All files import access: ${Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()}",
                     "Folder: ${folder.absolutePath}",
                     "Latest recording: ${latest?.name ?: "none"}",
                     "Latest size: ${latest?.length() ?: 0} bytes",
@@ -814,6 +821,37 @@ class MainActivity : Activity() {
             status.text = "Diagnostic complete. Send screenshot of Recording Setup."
             updateDefaultDialerInfo()
         }
+    }
+
+    private fun requestRecorderImportAccess() {
+        if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
+            try {
+                startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                    data = Uri.parse("package:$packageName")
+                })
+                status.text = "Allow All files access so Sales AI can import recorder files."
+                return
+            } catch (_: Exception) {
+                startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                status.text = "Allow All files access so Sales AI can import recorder files."
+                return
+            }
+        }
+        requestAudioPermission()
+        status.text = "Recorder import access is ready."
+    }
+
+    private fun hasRecorderImportAccess(): Boolean {
+        return Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager() || hasAudioPermission()
+    }
+
+    private fun scanRecorderImportsForSelectedContact() {
+        val contact = selectedContact ?: readyToUploadContact ?: contacts.firstOrNull()
+        if (contact == null) {
+            status.text = "Save or select a customer before scanning recorder files."
+            return
+        }
+        scanRecordingsForContact(contact, readyToUploadStartedAt.takeIf { it > 0L } ?: callStartedAt)
     }
 
     private fun requestAudioPermission() {
@@ -903,22 +941,24 @@ class MainActivity : Activity() {
         requestAudioPermission()
         selectedContact = contact
         recentAudioList.removeAllViews()
-        status.text = "Scanning phone audio for ${contact.name}..."
+        status.text = "Scanning recorder files for ${contact.name}..."
 
         scope.launch {
             try {
-                if (!hasAudioPermission()) {
-                    renderAudioScanHelp("Audio permission is not allowed. Allow Music/Audio permission for this app, then scan again.")
-                    status.text = "Audio permission required."
+                if (!hasRecorderImportAccess()) {
+                    renderAudioScanHelp("Recorder import access is not allowed. Tap Allow Recorder Import Access, then scan again.")
+                    status.text = "Recorder import access required."
                     return@launch
                 }
 
                 val candidates = withContext(Dispatchers.IO) {
-                    appFolderCandidates(startedAtMs) + recentAudioCandidates(startedAtMs)
+                    appFolderCandidates(startedAtMs) +
+                        recorderFolderCandidates(startedAtMs) +
+                        recentAudioCandidates(startedAtMs)
                 }.distinctBy { it.uri.toString() }
                 if (candidates.isEmpty()) {
-                    renderAudioScanHelp("No recording was found in the SalesAI folder or visible phone audio.")
-                    status.text = "No visible audio found. Use Select Recording File."
+                    renderAudioScanHelp("No recording was found in SalesAI, common recorder folders, or visible phone audio.")
+                    status.text = "No recorder file found. Use Select Recording File."
                     return@launch
                 }
 
@@ -960,8 +1000,12 @@ class MainActivity : Activity() {
     private fun renderAudioScanHelp(message: String) {
         recentAudioList.removeAllViews()
         recentAudioList.addView(TextView(this).apply {
-            text = "$message\n\nUse Select Recording File and choose the recording from Recorder/File Manager.\n\nWhy: Android does not allow this app to control or read hidden Phone app recording storage. True automatic recording needs cloud calling/VoIP integration."
+            text = "$message\n\nUse your phone recorder, Google Phone, or Truecaller to create the call recording, then tap Allow Recorder Import Access and Scan Phone Recorder Files.\n\nIf Android still hides the file, use Select Recording File and choose it from Recorder/File Manager."
             setPadding(0, 18, 0, 8)
+        })
+        recentAudioList.addView(Button(this).apply {
+            text = "Allow Recorder Import Access"
+            setOnClickListener { requestRecorderImportAccess() }
         })
         recentAudioList.addView(Button(this).apply {
             text = "Select Recording File"
@@ -1204,6 +1248,77 @@ class MainActivity : Activity() {
                 )
             }
             ?: emptyList()
+    }
+
+    private fun recorderFolderCandidates(startedAtMs: Long): List<AudioCandidate> {
+        if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
+            return emptyList()
+        }
+        val root = Environment.getExternalStorageDirectory()
+        val startMs = (startedAtMs.takeIf { it > 0L } ?: (System.currentTimeMillis() - 24 * 60 * 60 * 1000)) - 30 * 60 * 1000
+        val folders = commonRecorderFolders(root).filter { it.exists() && it.isDirectory }
+        val files = mutableListOf<File>()
+        folders.forEach { folder ->
+            collectAudioFiles(folder, startMs, files, maxDepth = 4)
+        }
+        return files
+            .distinctBy { it.absolutePath }
+            .sortedByDescending { it.lastModified() }
+            .take(40)
+            .map {
+                AudioCandidate(
+                    uri = Uri.fromFile(it),
+                    name = "${it.name}\n${it.parentFile?.name.orEmpty()}",
+                    addedSeconds = it.lastModified() / 1000,
+                    modifiedSeconds = it.lastModified() / 1000
+                )
+            }
+    }
+
+    private fun commonRecorderFolders(root: File): List<File> {
+        return listOf(
+            File(root, "Recordings"),
+            File(root, "Recordings/Call recordings"),
+            File(root, "Recordings/Calls"),
+            File(root, "CallRecordings"),
+            File(root, "Call Recordings"),
+            File(root, "Recorder"),
+            File(root, "Sound recorder"),
+            File(root, "MIUI/sound_recorder"),
+            File(root, "MIUI/sound_recorder/call_rec"),
+            File(root, "MIUI/sound_recorder/call_record"),
+            File(root, "MIUI/recorder"),
+            File(root, "Music/Recordings"),
+            File(root, "Download"),
+            File(root, "Android/media/com.google.android.dialer"),
+            File(root, "Android/media/com.google.android.apps.recorder"),
+            File(root, "Android/media/com.truecaller"),
+            File(root, "Android/media/com.truecaller.callrecording"),
+            File(root, "Android/data/com.truecaller/files"),
+            File(root, "Android/data/com.google.android.dialer/files")
+        )
+    }
+
+    private fun collectAudioFiles(folder: File, startMs: Long, out: MutableList<File>, maxDepth: Int) {
+        if (maxDepth < 0 || out.size >= 120) return
+        val children = try {
+            folder.listFiles()
+        } catch (_: Exception) {
+            null
+        } ?: return
+
+        children.forEach { child ->
+            if (out.size >= 120) return
+            when {
+                child.isFile && isAudioFileName(child.name) && child.lastModified() >= startMs -> out.add(child)
+                child.isDirectory && shouldScanRecorderDir(child) -> collectAudioFiles(child, startMs, out, maxDepth - 1)
+            }
+        }
+    }
+
+    private fun shouldScanRecorderDir(dir: File): Boolean {
+        val name = dir.name.lowercase(Locale.getDefault())
+        return name !in setOf("cache", "tmp", "thumbnails", ".thumbnails", "images", "pictures", "video")
     }
 
     private fun recentAudioCandidates(startedAtMs: Long): List<AudioCandidate> {
