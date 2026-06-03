@@ -159,7 +159,7 @@ class MainActivity : Activity() {
 
         mainPage.addView(sectionTitle("Upload Calls"))
         mainPage.addView(TextView(this).apply {
-            text = "Save customer, tap Call, return after call. Answered calls upload automatically."
+            text = "Free mode: record calls with your phone recorder or BCR, then Sales AI imports and uploads the real audio."
             textSize = 13f
             setTextColor(Color.rgb(92, 100, 115))
             setPadding(0, 0, 0, 10)
@@ -404,7 +404,7 @@ class MainActivity : Activity() {
     private fun ensureRecordingFolder() {
         val folder = recordingFolder()
         if (!folder.exists()) folder.mkdirs()
-        folderInfo.text = "Folder created:\n${folder.absolutePath}\n\nThis build can use Sales AI as the phone app to detect active calls and start the free foreground recorder. Android/device policy may still block the other side of a normal SIM call, so blank recordings are rejected before upload."
+        folderInfo.text = "Sales AI archive folder:\n${folder.absolutePath}\n\nFree working path: enable your phone recorder or BCR, then Sales AI scans recorder folders and uploads the real call audio. The built-in Sales AI mic recorder is diagnostic only on Redmi because Android blocks normal SIM call audio for third-party apps."
     }
 
     private fun showMainPage() {
@@ -447,10 +447,10 @@ class MainActivity : Activity() {
                     callCustomer(contact)
                 }
             })
-            box.addView(secondaryButton("Upload Latest Recording").apply {
+            box.addView(secondaryButton("Scan Recorder Files").apply {
                 setOnClickListener {
                     selectedContact = contact
-                    uploadLatestRecording(contact, readyToUploadStartedAt.takeIf { it > 0L } ?: callStartedAt)
+                    scanRecordingsForContact(contact, readyToUploadStartedAt.takeIf { it > 0L } ?: callStartedAt)
                 }
             })
             box.addView(secondaryButton("Select Recording File").apply {
@@ -472,8 +472,7 @@ class MainActivity : Activity() {
         autoUploadTried = false
         autoUploadRunning = false
         renderRecentCallPanel()
-        startExperimentalCallRecording(contact)
-        status.text = "Calling ${contact.name}. Recording started. Upload will run automatically after the call ends."
+        status.text = "Calling ${contact.name}. Use phone recorder/BCR for real audio. Sales AI will scan recorder files after the call."
         val uri = Uri.parse("tel:+91${contact.phone.filter { it.isDigit() }.takeLast(10)}")
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
             startActivity(Intent(Intent.ACTION_CALL, uri))
@@ -498,18 +497,18 @@ class MainActivity : Activity() {
         autoUploadRunning = true
         val startedAt = callStartedAt
         stopExperimentalCallRecording()
-        status.text = "Checking whether call was answered..."
+        status.text = "Checking call, then scanning phone recorder files..."
         scope.launch {
             delay(3_000L)
             val callDuration = withContext(Dispatchers.IO) {
                 latestOutgoingCallDurationSeconds(contact, startedAt)
             }
             if (callDuration == null) {
-                skipCallUpload(contact, "Could not verify answered call. Allow Call Log permission; upload skipped.")
+                skipCallUpload(contact, "Could not verify answered call. Allow Call Log permission, then scan recorder files.")
                 return@launch
             }
             if (callDuration <= 0L) {
-                skipCallUpload(contact, "Call was not answered. Recording deleted and upload skipped.")
+                skipCallUpload(contact, "Call was not answered. Upload skipped.")
                 return@launch
             }
             readyToUploadContact = contact
@@ -519,7 +518,7 @@ class MainActivity : Activity() {
             renderRecentCallPanel()
             status.text = message
             autoUploadRunning = false
-            uploadLatestRecording(contact, startedAt)
+            scanRecordingsForContact(contact, startedAt)
         }
     }
 
@@ -976,9 +975,10 @@ class MainActivity : Activity() {
         scope.launch {
             try {
                 val latest = withContext(Dispatchers.IO) {
-                    activeRecordingFile?.takeIf { it.exists() }?.let { Uri.fromFile(it) }
-                        ?: findLatestAppFolderRecording(startedAtMs)
+                    findLatestRecorderFolderRecording(startedAtMs)
                         ?: findLatestAudioRecording(startedAtMs)
+                        ?: findLatestAppFolderRecording(startedAtMs)
+                        ?: activeRecordingFile?.takeIf { it.exists() }?.let { Uri.fromFile(it) }
                 }
                 if (latest == null) {
                     status.text = "No recording auto-found. Scanning visible phone audio..."
@@ -1287,6 +1287,10 @@ class MainActivity : Activity() {
         return appFolderCandidates(startedAtMs).firstOrNull()?.uri
     }
 
+    private fun findLatestRecorderFolderRecording(startedAtMs: Long): Uri? {
+        return recorderFolderCandidates(startedAtMs).firstOrNull()?.uri
+    }
+
     private fun appFolderCandidates(startedAtMs: Long): List<AudioCandidate> {
         val folder = recordingFolder()
         if (!folder.exists()) folder.mkdirs()
@@ -1334,9 +1338,13 @@ class MainActivity : Activity() {
         return listOf(
             File(root, "Recordings"),
             File(root, "Recordings/Call recordings"),
+            File(root, "Recordings/Call Recordings"),
             File(root, "Recordings/Calls"),
+            File(root, "Recordings/BCR"),
+            File(root, "BCR"),
             File(root, "CallRecordings"),
             File(root, "Call Recordings"),
+            File(root, "Call recordings"),
             File(root, "Recorder"),
             File(root, "Sound recorder"),
             File(root, "MIUI/sound_recorder"),
@@ -1350,7 +1358,8 @@ class MainActivity : Activity() {
             File(root, "Android/media/com.truecaller"),
             File(root, "Android/media/com.truecaller.callrecording"),
             File(root, "Android/data/com.truecaller/files"),
-            File(root, "Android/data/com.google.android.dialer/files")
+            File(root, "Android/data/com.google.android.dialer/files"),
+            File(root, "Android/data/com.chiller3.bcr/files")
         )
     }
 
